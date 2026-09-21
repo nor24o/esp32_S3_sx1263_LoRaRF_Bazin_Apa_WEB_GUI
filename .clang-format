@@ -1,0 +1,9 @@
+# Do not break the constructor initializer lists or array lists
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+AllowAllArgumentsOnNextLine: true
+AllowAllConstructorInitializersOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+# Attempt to keep it on one line if it fits within the limit
+ColumnLimit: 100 
+# Disable breaking after the opening brace
+BreakBeforeBraces: Attach
