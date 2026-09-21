@@ -93,10 +93,13 @@ struct SystemState {
   bool rxFlash = false;
   bool txFlash = false;
   bool waterLevelValid = false; 
-  bool demandActive = false;    // Mirrors tank charging cycle state
+  bool demandActive = false;          // Mirrors tank charging cycle state
+  bool triggerImmediateTelem = false; // Flag to send status telemetry immediately
 };
 
 static LocalConfig gConfig;
+static LocalConfig gConfigSaved = {};
+static bool gConfigSavedValid = false;
 static NodeStats gStats;
 static SystemState gState;
 
@@ -127,11 +130,16 @@ static bool validateConfig(const LocalConfig &c) {
          c.telemetry_interval_ms <= CFG_TELEM_MAX_MS && c.boot_auto_mode <= 1;
 }
 
-static void saveConfig() {
+static void saveConfig(bool force = false) {
+  if (!force && gConfigSavedValid && memcmp(&gConfig, &gConfigSaved, sizeof(LocalConfig)) == 0) {
+    return; // Skip redundant flash writes
+  }
   prefs.begin(NVS_NAMESPACE, false);
   prefs.putUChar(NVS_KEY_CFGVER, CONFIG_VERSION);
   prefs.putBytes(NVS_KEY_CFG, &gConfig, sizeof(gConfig));
   prefs.end();
+  gConfigSaved = gConfig;
+  gConfigSavedValid = true;
 }
 
 static void loadConfig() {
@@ -144,7 +152,10 @@ static void loadConfig() {
   if (!ok || !validateConfig(gConfig)) {
     Serial.println("[Config] Reset to defaults");
     resetConfigToDefaults();
-    saveConfig();
+    saveConfig(true);
+  } else {
+    gConfigSaved = gConfig;
+    gConfigSavedValid = true;
   }
 }
 
@@ -167,6 +178,26 @@ static void loadStats() {
 }
 
 // ─── Direct Output Executer (Relay Chatter Guarded) ───────────────────────────
+static bool canChangePumpState(const PumpHysteresis &ph, bool wantOn, bool emergencyDryStop,
+                               uint32_t minRunMs, uint32_t minCooldownMs) {
+  if (!ph.initialized) return true;
+  if (ph.state == wantOn) return false;
+
+  // Emergency dry stop bypasses minimum runtime to protect pumps immediately!
+  if (!wantOn && emergencyDryStop) {
+    return true;
+  }
+
+  uint32_t now = millis();
+  if (!wantOn && (now - ph.lastOnTime < minRunMs)) {
+    return false; // Still within mandatory runtime
+  }
+  if (wantOn && (now - ph.lastOffTime < minCooldownMs)) {
+    return false; // Still within mandatory cooldown
+  }
+  return true;
+}
+
 static void setPumpState(PumpHysteresis &ph, bool on, int pin) {
   if (ph.initialized && ph.state == on) {
     return; 
@@ -180,6 +211,8 @@ static void setPumpState(PumpHysteresis &ph, bool on, int pin) {
 
 // ─── LoRa helpers ─────────────────────────────────────────────────────────────
 static void setForRx() {
+  sx126x_setBufferBaseAddress(0, 0);
+  sx126x_clearIrqStatus(0x03FF);
   LoRa.setLoRaPacket(SX126X_HEADER_EXPLICIT, LORA_PREAMBLE_LEN, LORA_MAX_PAYLOAD, true, true);
   LoRa.setRxGain(SX126X_RX_GAIN_BOOSTED);
   LoRa.request(SX126X_RX_CONTINUOUS);
@@ -205,6 +238,7 @@ static void Task_LoRaManager(void *) {
     if (xQueueReceive(xTxQueue, &txPkt, 0) == pdTRUE) {
       uint8_t payLen = (txPkt.header.msg_type == MSG_STATUS) ? (uint8_t)sizeof(StatusPayload)
                                                              : (uint8_t)sizeof(CmdPayload);
+      sx126x_setBufferBaseAddress(0, 0);
       LoRa.setLoRaPacket(SX126X_HEADER_EXPLICIT, LORA_PREAMBLE_LEN, payLen, true, false);
       LoRa.beginPacket();
       LoRa.write((uint8_t *)&txPkt, sizeof(LoRaHeader) + payLen);
@@ -256,8 +290,12 @@ static void Task_LoRaManager(void *) {
 // ─── Input sensor task (Core 1, Pri 3) ────────────────────────────────────────
 static void Task_InputSensorPoll(void *) {
   TickType_t wake = xTaskGetTickCount();
-  uint8_t prev = 0xFF;
+  uint8_t prevBtns = 0xFF;
   uint32_t retryAt = 0;
+  uint8_t candidateLvl = 0xFF;
+  uint32_t candidateSince = 0;
+  uint8_t lastStableLvl = 0xFF;
+  uint32_t lastBtnEdgeTime = 0;
 
   for (;;) {
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(INPUT_POLL_MS));
@@ -289,6 +327,8 @@ static void Task_InputSensorPoll(void *) {
     if (!Wire.available()) {
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
         gState.pcfOk = false;
+        gState.waterLevelValid = false;
+        gState.errorCode = ERR_PCF_I2C;
         xSemaphoreGive(xStateMutex);
       }
       retryAt = millis() + PCF_RETRY_MS;
@@ -296,18 +336,73 @@ static void Task_InputSensorPoll(void *) {
     }
     uint8_t curr = Wire.read();
 
-    uint8_t lvl = 0;
-    for (int i = 0; i < PCF_FLOAT_BITS; i++) {
-      if (curr & (1 << i)) break;
-      lvl++;
+    // ── FLOAT SENSOR PLAUSIBILITY CHECK ──
+    // Float switches are bits 0, 1, 2. (Active-LOW: 0 = submerged/closed, 1 = dry/open)
+    uint8_t floatBits = curr & 0x07;
+    uint8_t rawLvl = 0;
+    bool plausibilityOk = false;
+
+    // Allowed continuous physical configurations:
+    // 0b111 (7): All dry -> Level 0
+    // 0b110 (6): Float 1 submerged, 2&3 dry -> Level 1
+    // 0b100 (4): Floats 1&2 submerged, 3 dry -> Level 2
+    // 0b000 (0): Floats 1,2&3 submerged -> Level 3
+    if (floatBits == 0x07) {
+      rawLvl = 0;
+      plausibilityOk = true;
+    } else if (floatBits == 0x06) {
+      rawLvl = 1;
+      plausibilityOk = true;
+    } else if (floatBits == 0x04) {
+      rawLvl = 2;
+      plausibilityOk = true;
+    } else if (floatBits == 0x00) {
+      rawLvl = 3;
+      plausibilityOk = true;
+    } else {
+      // Inconsistent / impossible combination (e.g. 0b101, 0b011, 0b010, 0b001)
+      plausibilityOk = false;
     }
 
-    uint8_t edges = (~prev) & curr & PCF_BTN_MASK;
-    prev = curr;
+    // Debouncing water level transitions to filter wave ripples/sloshing
+    bool levelChanged = false;
+    if (plausibilityOk) {
+      if (rawLvl != candidateLvl) {
+        candidateLvl = rawLvl;
+        candidateSince = now;
+      } else if ((now - candidateSince) >= FLOAT_DEBOUNCE_MS) {
+        if (lastStableLvl != candidateLvl) {
+          lastStableLvl = candidateLvl;
+          levelChanged = true;
+        }
+      }
+    }
+
+    // ── BUTTON DEBOUNCE (50ms) ──
+    uint8_t edges = 0;
+    if (now - lastBtnEdgeTime >= BTN_DEBOUNCE_MS) {
+      edges = (~prevBtns) & curr & PCF_BTN_MASK;
+      if (edges) lastBtnEdgeTime = now;
+    }
+    prevBtns = curr;
 
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-      gState.waterLevel = lvl;
-      gState.waterLevelValid = true;
+      if (!plausibilityOk) {
+        gState.waterLevelValid = false;
+        gState.errorCode = ERR_FLOAT_PLAUSIBILITY;
+      } else {
+        if (gState.errorCode == ERR_FLOAT_PLAUSIBILITY || gState.errorCode == ERR_PCF_I2C) {
+          gState.errorCode = ERR_NONE;
+        }
+        if (lastStableLvl != 0xFF) {
+          gState.waterLevel = lastStableLvl;
+          gState.waterLevelValid = true;
+          if (levelChanged) {
+            gState.triggerImmediateTelem = true;
+          }
+        }
+      }
+
       if (edges & (1 << PCF_BTN_BIT_MODE))   gState.btnMode_edge = true;
       if (edges & (1 << PCF_BTN_BIT_P1))     gState.btnP1_edge = true;
       if (edges & (1 << PCF_BTN_BIT_P2))     gState.btnP2_edge = true;
@@ -395,8 +490,8 @@ static void Task_ControlEngine(void *) {
     }
 
     if (radioOk && gwSeen) {
-      if ((now - lastGwMs) >= DEFAULT_NETWORK_TIMEOUT_MS) errorCode = 3;
-      else if (errorCode == 3) errorCode = 0;
+      if ((now - lastGwMs) >= DEFAULT_NETWORK_TIMEOUT_MS) errorCode = ERR_GATEWAY_TIMEOUT;
+      else if (errorCode == ERR_GATEWAY_TIMEOUT) errorCode = ERR_NONE;
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
         gState.errorCode = errorCode;
         xSemaphoreGive(xStateMutex);
@@ -409,6 +504,7 @@ static void Task_ControlEngine(void *) {
       saveConfig();
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
         gState.autoMode = autoMode;
+        gState.triggerImmediateTelem = true;
         xSemaphoreGive(xStateMutex);
       }
       Serial.printf("\n[Ctrl] Mode -> %s\n", autoMode ? "AUTO" : "MANUAL");
@@ -419,6 +515,10 @@ static void Task_ControlEngine(void *) {
         gConfig.pond_enabled = !gConfig.pond_enabled;
         saveConfig();
         Serial.printf("\n[Ctrl] Manual Pond Request -> %s (Saved)\n", gConfig.pond_enabled ? "ON" : "OFF");
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+          gState.triggerImmediateTelem = true;
+          xSemaphoreGive(xStateMutex);
+        }
       } else {
         Serial.println("\n[Ctrl] Pond toggle ignored. Handled automatically in AUTO mode.");
       }
@@ -443,6 +543,7 @@ static void Task_ControlEngine(void *) {
           saveConfig();
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
             gState.autoMode = autoMode;
+            gState.triggerImmediateTelem = true;
             xSemaphoreGive(xStateMutex);
           }
           Serial.printf("[Ctrl] Mode -> %s\n", autoMode ? "AUTO" : "MANUAL");
@@ -453,6 +554,10 @@ static void Task_ControlEngine(void *) {
             gConfig.pond_enabled = setVal ? (bool)value : !gConfig.pond_enabled;
             saveConfig();
             Serial.printf("[Ctrl] Remote Pond Switch Command -> %s\n", gConfig.pond_enabled ? "ON" : "OFF");
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+              gState.triggerImmediateTelem = true;
+              xSemaphoreGive(xStateMutex);
+            }
           }
         }
 
@@ -464,15 +569,29 @@ static void Task_ControlEngine(void *) {
               if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                 gState.pumpEnabledAuto[i] = want;
                 gConfig.pump_enabled_auto[i] = want; 
+                gState.triggerImmediateTelem = true;
                 xSemaphoreGive(xStateMutex);
                 saveConfig(); 
                 Serial.printf("[Ctrl] Auto P%d selection via LoRa -> %s (Saved)\n", i + 1, gConfig.pump_enabled_auto[i] ? "SELECTED" : "DESELECTED");
               }
             } else {
-              setPumpState(*ph[i], want, relayPin[i]);
-              gConfig.pump_manual_state[i] = want;
-              saveConfig();
-              Serial.printf("[Ctrl] Manual P%d via LoRa -> %s (saved)\n", i + 1, want ? "ON" : "OFF");
+              if (want && !canChangePumpState(*ph[i], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+                Serial.printf("[Ctrl] Manual P%d via LoRa rejected: cooldown active\n", i + 1);
+              } else {
+                if (!want && ph[i]->state) {
+                  *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
+                } else if (want) {
+                  pOnSince[i] = millis();
+                }
+                setPumpState(*ph[i], want, relayPin[i]);
+                gConfig.pump_manual_state[i] = want;
+                saveConfig();
+                Serial.printf("[Ctrl] Manual P%d via LoRa -> %s (saved)\n", i + 1, want ? "ON" : "OFF");
+                if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                  gState.triggerImmediateTelem = true;
+                  xSemaphoreGive(xStateMutex);
+                }
+              }
             }
           }
         }
@@ -487,26 +606,34 @@ static void Task_ControlEngine(void *) {
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
           gState.pumpEnabledAuto[i] = !gState.pumpEnabledAuto[i];
           gConfig.pump_enabled_auto[i] = gState.pumpEnabledAuto[i]; 
+          gState.triggerImmediateTelem = true;
           xSemaphoreGive(xStateMutex);
           saveConfig(); 
           Serial.printf("\n[Ctrl] Auto P%d selection via Button -> %s (Saved)\n", i + 1, gConfig.pump_enabled_auto[i] ? "SELECTED" : "DESELECTED");
         }
       } else {
         bool want = !ph[i]->state;
-        if (!want && ph[i]->state) {
-          *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
-          saveStats();
-        } else if (want) {
-          pOnSince[i] = millis();
+        if (want && !canChangePumpState(*ph[i], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+          Serial.printf("\n[Ctrl] P%d toggle rejected: cooldown active\n", i + 1);
+        } else {
+          if (!want && ph[i]->state) {
+            *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
+          } else if (want) {
+            pOnSince[i] = millis();
+          }
+          setPumpState(*ph[i], want, relayPin[i]);
+          gConfig.pump_manual_state[i] = want;
+          saveConfig();
+          Serial.printf("\n[Ctrl] P%d -> %s (saved)\n", i + 1, want ? "ON" : "OFF");
+          if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            gState.triggerImmediateTelem = true;
+            xSemaphoreGive(xStateMutex);
+          }
         }
-        setPumpState(*ph[i], want, relayPin[i]);
-        gConfig.pump_manual_state[i] = want;
-        saveConfig();
-        Serial.printf("\n[Ctrl] P%d -> %s (saved)\n", i + 1, want ? "ON" : "OFF");
       }
     }
 
-    // ── FIXED: PARALLEL IRRIGATION AUTOMATIC CONTROL ENGINE ─────────────────────
+    // ── FIXED: PARALLEL IRRIGATION AUTOMATIC CONTROL ENGINE WITH ANTI-CHATTER ───
     if (autoMode) {
       bool allowed[3] = {true, true, true};
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
@@ -518,19 +645,27 @@ static void Task_ControlEngine(void *) {
 
       // Outflow pumps are parallel: they run if water is available anywhere inside the tank (WL > 0)
       bool waterAvailable = (waterLevelValid && waterLevel > 0);
+      bool emergencyDry = (waterLevelValid && waterLevel == 0);
 
       for (int i = 0; i < 3; i++) {
         bool targetState = waterAvailable && allowed[i];
 
         if (targetState != ph[i]->state) {
-          if (!targetState && ph[i]->state) {
-            *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
-            saveStats();
-          } else if (targetState) {
-            pOnSince[i] = millis();
+          if (canChangePumpState(*ph[i], targetState, emergencyDry,
+                                 gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+            if (!targetState && ph[i]->state) {
+              *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
+            } else if (targetState) {
+              pOnSince[i] = millis();
+            }
+            setPumpState(*ph[i], targetState, relayPin[i]);
+            Serial.printf("\n[Ctrl][Auto] Outflow Irrigation Pump P%d -> %s (WL=%u)\n", i + 1, targetState ? "ON" : "OFF", waterLevel);
+
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+              gState.triggerImmediateTelem = true;
+              xSemaphoreGive(xStateMutex);
+            }
           }
-          setPumpState(*ph[i], targetState, relayPin[i]);
-          Serial.printf("\n[Ctrl][Auto] Outflow Irrigation Pump P%d -> %s (WL=%u)\n", i + 1, targetState ? "ON" : "OFF", waterLevel);
         }
       }
     }
@@ -542,16 +677,42 @@ static void Task_ControlEngine(void *) {
       xSemaphoreGive(xStateMutex);
     }
 
-    if (radioOk && (now - lastTelem) >= gConfig.telemetry_interval_ms) {
+    // ── PERIODIC NVS STATS FLUSH (Protects Flash Endurance) ─────────────────
+    static uint32_t lastStatsSave = 0;
+    if (now - lastStatsSave >= NVS_STATS_SAVE_INTERVAL_MS) {
+      lastStatsSave = now;
+      for (int i = 0; i < 3; i++) {
+        if (ph[i]->state && pOnSince[i] > 0) {
+          uint32_t elapsed = (now - pOnSince[i]) / 1000;
+          *pRtStats[i] += elapsed;
+          pOnSince[i] = now;
+        }
+      }
+      saveStats();
+      Serial.println("\n[NVS] Periodic pump stats saved to flash");
+    }
+
+    // ── EVENT-DRIVEN & PERIODIC TELEMETRY DISPATCH ──────────────────────────
+    bool triggerTelem = false;
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      triggerTelem = gState.triggerImmediateTelem;
+      gState.triggerImmediateTelem = false;
+      xSemaphoreGive(xStateMutex);
+    }
+
+    if (radioOk && (triggerTelem || ((now - lastTelem) >= gConfig.telemetry_interval_ms))) {
       lastTelem = now;
       LoRaPacket tx = {};
       buildStatus(tx);
       xQueueSend(xTxQueue, &tx, 0);
     }
 
-    // ── PERIODIC DISPATCH BROADCAST FOR THE REMOTE POND CHARGER ──────────
-    if (radioOk && (now - lastPondBroadcast >= gConfig.telemetry_interval_ms)) {
+    // ── DISPATCH BROADCAST FOR THE REMOTE POND CHARGER ──────────────────────
+    static bool lastDispatchedPond = false;
+    bool pondChanged = (gConfig.pond_enabled != lastDispatchedPond);
+    if (radioOk && (pondChanged || (now - lastPondBroadcast >= gConfig.telemetry_interval_ms))) {
       lastPondBroadcast = now;
+      lastDispatchedPond = gConfig.pond_enabled;
       LoRaPacket txPkt = {};
       txPkt.header = {MY_NETWORK_MAGIC, NODE_POND, NODE_TANK, MSG_CMD};
       txPkt.payload.cmd = {CMD_TARGET_POND, CMD_ACTION_SET, gConfig.pond_enabled ? (uint8_t)1 : (uint8_t)0}; 
@@ -620,7 +781,9 @@ static void Task_UIAnimation(void *) {
       leds[1 + i] = (i < (int)wl) ? lvlColor[i] : dimBase;
     }
 
-    if (ec == 3) leds[4] = CRGB::Red;
+    if (ec == ERR_GATEWAY_TIMEOUT) leds[4] = CRGB::Red;
+    else if (ec == ERR_FLOAT_PLAUSIBILITY) leds[4] = CRGB::Magenta;
+    else if (ec == ERR_PCF_I2C) leds[4] = CRGB::Yellow;
     else if (now < rxEnd) leds[4] = CRGB(LED_COLOR_RX_FLASH);
     else if (now < txEnd) leds[4] = CRGB(LED_COLOR_TX_FLASH);
     else if (am) leds[4] = CRGB::Green;
@@ -745,6 +908,9 @@ static void Task_SerialConsole(void *) {
           if (xControlTask) xTaskNotifyGive(xControlTask);
           Serial.printf("Injected %s edge\n", cmd.c_str());
         } else if (cmd == "reboot") {
+          saveStats();
+          saveConfig(true);
+          Serial.println("Flushed NVS and restarting...");
           Serial.flush();
           esp_restart();
         } else {

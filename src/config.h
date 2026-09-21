@@ -66,14 +66,26 @@
 // ─── Default runtime config ───────────────────────────────────────────────────
 #define DEFAULT_PUMP_MIN_RUNTIME_MS    20000UL  
 #define DEFAULT_PUMP_MIN_COOLDOWN_MS   20000UL  
-#define DEFAULT_TELEMETRY_INTERVAL_MS  10000UL  
+#define DEFAULT_TELEMETRY_INTERVAL_MS  30000UL  // 30s heartbeat (immediate TX on state change)
 #define DEFAULT_NETWORK_TIMEOUT_MS     60000UL  
+
+// ─── Debounce & Filtration ────────────────────────────────────────────────────
+#define FLOAT_DEBOUNCE_MS               1500UL  // Stable float reading duration to filter water sloshing
+#define BTN_DEBOUNCE_MS                   50UL  // Push button debounce time
+#define NVS_STATS_SAVE_INTERVAL_MS    600000UL  // Flush pump runtime stats every 10 min to protect flash
+
+// ─── Error codes ──────────────────────────────────────────────────────────────
+#define ERR_NONE               0
+#define ERR_RADIO              1
+#define ERR_PCF_I2C            2
+#define ERR_GATEWAY_TIMEOUT    3
+#define ERR_FLOAT_PLAUSIBILITY 4
 
 // ─── Config field validation bounds ───────────────────────────────────────────
 #define CFG_RUNTIME_MIN_MS       1000UL
-#define CFG_RUNTIME_MAX_MS      10000UL
+#define CFG_RUNTIME_MAX_MS     300000UL  // 5 min maximum
 #define CFG_COOLDOWN_MIN_MS      5000UL
-#define CFG_COOLDOWN_MAX_MS    600000UL
+#define CFG_COOLDOWN_MAX_MS    600000UL  // 10 min maximum
 #define CFG_TELEM_MIN_MS         2000UL
 #define CFG_TELEM_MAX_MS       300000UL
 
