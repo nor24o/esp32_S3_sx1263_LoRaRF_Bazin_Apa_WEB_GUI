@@ -191,6 +191,7 @@ If the PCF8574 expander cable disconnects or bus communication fails, `waterLeve
 | :--- | :---: | :---: | :---: | :--- |
 | `LoRaMgr` | Core 0 | Pri 2 | 4 KB | SX1262 packet transmission, continuous reception, and FIFO buffer alignment |
 | `SerialCon` | Core 0 | Pri 1 | 4 KB | Interactive serial CLI parser and diagnostic monitor |
+| `DebugWeb` | Core 0 | Pri 1 | 8 KB | On-demand WiFi SoftAP, HTTP web server, Captive Portal DNS, & WebSocket server |
 | `CtrlEng` | Core 1 | Pri 4 | 6 KB | Automation engine, anti-chatter guards, relay execution, and hysteresis latch |
 | `InputPoll` | Core 1 | Pri 3 | 2 KB | 20 ms PCF8574 reading, float switch plausibility verification, and slosh debounce |
 | `ReadSensor`| Core 1 | Pri 3 | 4 KB | Temperature and humidity sensor acquisition |
@@ -198,35 +199,75 @@ If the PCF8574 expander cable disconnects or bus communication fails, `waterLeve
 
 ---
 
-## 6. Serial Console CLI Reference
+## 6. Interactive Serial Console CLI Reference
 
-Connect over USB CDC at **921,600 baud** (or 115,200 baud terminal). Available commands:
+Connect over USB CDC at **921,600 baud**. Available commands:
 
 | Command | Description |
 | :--- | :--- |
 | `help` | Lists all available interactive console commands |
 | `status` | Prints real-time water level, pump relay states, error code, RSSI, and SNR |
 | `radio` | Displays LoRa link metrics (`RSSI`, `SNR`, radio health) |
-| `config` | Displays current runtime configuration (runtime, cooldown, telemetry interval, masks) |
+| `config` | Displays current runtime configuration (runtime, cooldown, telemetry interval, masks, debug state) |
 | `stats` | Displays accumulated pump runtime seconds and device boot count |
 | `auto` | Switches system to **AUTOMATIC** mode |
 | `manual` | Switches system to **MANUAL** mode |
-| `p1` / `p2` / `p3` | Toggles the corresponding outflow pump relay (subject to cooldown protection) |
-| `pond` | Toggles the remote pond inflow refill pump demand |
+| `p1` / `p2` / `p3` | Injects a button press to toggle the corresponding outflow pump relay |
+| `pond` | Injects a button press to toggle the remote pond inflow refill pump demand |
+| `debug on` | Activates WiFi SoftAP (`TankNode-Debug`) and starts the Web & WebSocket dashboard |
+| `debug off` | Shuts down the Web & WebSocket server and powers WiFi radio completely OFF |
+| `set runtime <ms>` | Sets minimum pump runtime in ms (`1000` to `300000` ms) and saves to NVS |
+| `set cooldown <ms>` | Sets minimum pump cooldown in ms (`5000` to `600000` ms) and saves to NVS |
+| `set telem <ms>` | Sets telemetry broadcast interval in ms (`2000` to `300000` ms) and saves to NVS |
+| `set mask <p1> <p2> <p3>` | Configures automated pumps allowed in Auto Mode (e.g. `set mask 1 1 0`) |
+| `set pond <0|1>` | Enables or disables the remote pond pump filling system |
+| `set mode <auto|manual>` | Configures operating mode and default boot mode in NVS |
+| `set defaults` | Restores all factory default parameters to NVS flash |
+| `save` | Commits current runtime configuration and statistics to NVS flash |
 | `tx` | Manually enqueues and transmits a status telemetry packet |
 | `reboot` | Flushes all runtime statistics to NVS flash and restarts the ESP32-S3 |
 
 ---
 
-## 7. Build & Flash
+## 7. On-Demand Debug Web Dashboard
+
+When debug mode is enabled (via `debug on` in Serial or set to 1 in config), the ESP32-S3 starts a zero-configuration diagnostic hotspot:
+
+* **Wi-Fi SSID**: `TankNode-Debug`
+* **Wi-Fi Password**: `12345678`
+* **Dashboard URL**: `http://192.168.4.1` (Captive Portal enabled: any request automatically redirects to dashboard)
+* **WebSocket Port**: `ws://192.168.4.1:81/` (broadcasting live telemetry JSON every 500ms)
+
+### Dashboard Features
+1. **Interactive Animated Reservoir**: Real-time visual depiction of water levels (Empty, Low, Mid, Full) with dynamic gradient waves.
+2. **Float Sensor Plausibility Status**: Shows each physical float switch reading and flags invalid sensor combinations in real time.
+3. **Pumps & Mode Control**: One-click toggle buttons for Manual/Auto modes, outflow pumps P1–P3, and remote pond pump.
+4. **Auto Pump Mask Configuration**: Checkbox selectors to include/exclude specific pumps in automatic irrigation cycles.
+5. **Runtime Configuration Inputs**: Dynamic input forms to adjust `Pump Min Runtime`, `Pump Cooldown`, and `Telemetry Interval` with live validation and Flash save confirmation toasts.
+6. **Live Telemetry & Diagnostics**: Real-time RSSI, SNR, Free Heap memory, device uptime, and boot counter.
+
+### Dual Serving Architecture (LittleFS + Embedded Fallback)
+The web assets are separated into clean, modern files inside `data/`:
+* `data/index.html` - Responsive semantic HTML5 dashboard
+* `data/style.css` - Glassmorphic modern responsive stylesheet
+* `data/app.js` - Real-time WebSocket communications & UI updater
+
+*Embedded PROGMEM Fallback*: `src/web_assets.h` contains a compiled standalone fallback page. Even if the user flashes firmware without uploading the LittleFS partition, the dashboard still renders completely!
+
+---
+
+## 8. Build & Flash
 
 ```bash
-# Build firmware
+# 1. Build firmware
 pio run
 
-# Flash to ESP32-S3 on COM3
-pio run --target upload
+# 2. Upload LittleFS Web Dashboard files (index.html, style.css, app.js)
+pio run --target uploadfs --upload-port COM3
 
-# Open serial monitor
-pio device monitor -b 921600
+# 3. Flash firmware binary to ESP32-S3
+pio run --target upload --upload-port COM3
+
+# 4. Open serial monitor at 921,600 baud
+pio device monitor -b 921600 -p COM3
 ```

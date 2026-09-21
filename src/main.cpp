@@ -10,8 +10,14 @@
 #include <SPI.h>
 #include <SX126x.h>
 #include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <DNSServer.h>
+#include <LittleFS.h>
 
 #include "config.h"
+#include "web_assets.h"
 
 // ─── Protocol structs ─────────────────────────────────────────────────────────
 enum MsgType : uint8_t { MSG_STATUS = 1, MSG_CMD = 2 };
@@ -55,6 +61,7 @@ struct LocalConfig {
   bool pond_enabled;         
   bool pump_manual_state[3]; 
   bool last_demand_state;    // Stored filling state latch for the pond charger
+  uint8_t debug_mode_enabled; // 1 = start WiFi hotspot on boot, 0 = keep off
 };
 
 struct NodeStats {
@@ -118,7 +125,7 @@ static PumpHysteresis phP1, phP2, phP3;
 // ─── Config / Stats persistence ───────────────────────────────────────────────
 static void resetConfigToDefaults() {
   gConfig = {DEFAULT_PUMP_MIN_RUNTIME_MS, DEFAULT_PUMP_MIN_COOLDOWN_MS,
-             DEFAULT_TELEMETRY_INTERVAL_MS, 0, {false, false, false}, false, {false, false, false}, false};
+             DEFAULT_TELEMETRY_INTERVAL_MS, 0, {false, false, false}, false, {false, false, false}, false, 0};
 }
 
 static bool validateConfig(const LocalConfig &c) {
@@ -127,7 +134,9 @@ static bool validateConfig(const LocalConfig &c) {
          c.pump_min_cooldown_ms >= CFG_COOLDOWN_MIN_MS &&
          c.pump_min_cooldown_ms <= CFG_COOLDOWN_MAX_MS &&
          c.telemetry_interval_ms >= CFG_TELEM_MIN_MS &&
-         c.telemetry_interval_ms <= CFG_TELEM_MAX_MS && c.boot_auto_mode <= 1;
+         c.telemetry_interval_ms <= CFG_TELEM_MAX_MS &&
+         c.boot_auto_mode <= 1 &&
+         c.debug_mode_enabled <= 1;
 }
 
 static void saveConfig(bool force = false) {
@@ -286,6 +295,268 @@ static void Task_LoRaManager(void *) {
     vTaskDelay(pdMS_TO_TICKS(LORA_POLL_MS));
   }
 }
+
+// ─── Debug Web / WebSocket Server (Core 0, Pri 1) ─────────────────────────────
+#if ENABLE_DEBUG_WEB
+static WebServer httpServer(DEBUG_HTTP_PORT);
+static WebSocketsServer wsServer(DEBUG_WS_PORT);
+static DNSServer dnsServer;
+static bool gDebugServerRunning = false;
+static bool gDebugServerWanted = false;
+
+static void broadcastTelemetryWs() {
+  if (!gDebugServerRunning) return;
+  char buf[384];
+  uint8_t wl = 0, ec = 0;
+  bool am = false, pond = false, demand = false, pcfOk = false;
+  bool ps[3] = {}, pea[3] = {};
+  int16_t rssi = 0; int8_t snr = 0;
+  
+  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    wl = gState.waterLevel;
+    am = gState.autoMode;
+    pond = gState.pond;
+    demand = gState.demandActive;
+    ec = gState.errorCode;
+    pcfOk = gState.pcfOk;
+    for (int i = 0; i < 3; i++) {
+      ps[i] = gState.pumpState[i];
+      pea[i] = gState.pumpEnabledAuto[i];
+    }
+    rssi = gState.lastRssi;
+    snr = gState.lastSnr;
+    xSemaphoreGive(xStateMutex);
+  }
+
+  const char *errStr = "NONE";
+  if (ec == ERR_RADIO) errStr = "RADIO FAULT";
+  else if (ec == ERR_PCF_I2C) errStr = "PCF8574 I2C FAULT";
+  else if (ec == ERR_GATEWAY_TIMEOUT) errStr = "GATEWAY TIMEOUT";
+  else if (ec == ERR_FLOAT_PLAUSIBILITY) errStr = "FLOAT PLAUSIBILITY FAULT";
+
+  snprintf(buf, sizeof(buf),
+    "{\"type\":\"telemetry\",\"wl\":%u,\"mode\":\"%s\",\"pumps\":[%d,%d,%d],"
+    "\"auto_mask\":[%d,%d,%d],\"pond\":%d,\"demand\":%d,\"err\":%u,\"err_str\":\"%s\","
+    "\"rssi\":%d,\"snr\":%d,\"heap\":%lu,\"uptime\":%lu,\"boots\":%lu,\"pcf_ok\":%d}",
+    wl, am ? "AUTO" : "MAN", ps[0], ps[1], ps[2],
+    pea[0], pea[1], pea[2], pond, demand, ec, errStr,
+    rssi, snr, (unsigned long)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
+    (unsigned long)gStats.boot_count, pcfOk ? 1 : 0
+  );
+  wsServer.broadcastTXT(buf);
+}
+
+static void sendConfigWs(uint8_t num) {
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+    "{\"type\":\"config\",\"runtime\":%lu,\"cooldown\":%lu,\"telem\":%lu,"
+    "\"boot_auto\":%u,\"debug\":%u}",
+    (unsigned long)gConfig.pump_min_runtime_ms,
+    (unsigned long)gConfig.pump_min_cooldown_ms,
+    (unsigned long)gConfig.telemetry_interval_ms,
+    gConfig.boot_auto_mode,
+    gConfig.debug_mode_enabled
+  );
+  wsServer.sendTXT(num, buf);
+}
+
+static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  if (type == WStype_CONNECTED) {
+    IPAddress ip = wsServer.remoteIP(num);
+    Serial.printf("[DebugWS] Client #%u connected from %s\n", num, ip.toString().c_str());
+    sendConfigWs(num);
+  } else if (type == WStype_DISCONNECTED) {
+    Serial.printf("[DebugWS] Client #%u disconnected\n", num);
+  } else if (type == WStype_TEXT) {
+    String msg = String((char *)payload);
+    if (msg.indexOf("\"cmd\":\"get_config\"") >= 0) {
+      sendConfigWs(num);
+    } else if (msg.indexOf("\"cmd\":\"mode\"") >= 0) {
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        gState.btnMode_edge = true;
+        xSemaphoreGive(xStateMutex);
+      }
+      if (xControlTask) xTaskNotifyGive(xControlTask);
+    } else if (msg.indexOf("\"cmd\":\"pond\"") >= 0) {
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        gState.btnPond_edge = true;
+        xSemaphoreGive(xStateMutex);
+      }
+      if (xControlTask) xTaskNotifyGive(xControlTask);
+    } else if (msg.indexOf("\"cmd\":\"pump\"") >= 0) {
+      int idIdx = msg.indexOf("\"id\":");
+      if (idIdx >= 0) {
+        int pId = msg.substring(idIdx + 5).toInt();
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          if (pId == 1) gState.btnP1_edge = true;
+          else if (pId == 2) gState.btnP2_edge = true;
+          else if (pId == 3) gState.btnP3_edge = true;
+          xSemaphoreGive(xStateMutex);
+        }
+        if (xControlTask) xTaskNotifyGive(xControlTask);
+      }
+    } else if (msg.indexOf("\"cmd\":\"set_auto_mask\"") >= 0) {
+      int mIdx = msg.indexOf("\"mask\":[");
+      if (mIdx >= 0) {
+        int p1 = msg.charAt(mIdx + 8) - '0';
+        int p2 = msg.charAt(mIdx + 10) - '0';
+        int p3 = msg.charAt(mIdx + 12) - '0';
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          gState.pumpEnabledAuto[0] = (p1 == 1);
+          gState.pumpEnabledAuto[1] = (p2 == 1);
+          gState.pumpEnabledAuto[2] = (p3 == 1);
+          gConfig.pump_enabled_auto[0] = gState.pumpEnabledAuto[0];
+          gConfig.pump_enabled_auto[1] = gState.pumpEnabledAuto[1];
+          gConfig.pump_enabled_auto[2] = gState.pumpEnabledAuto[2];
+          gState.triggerImmediateTelem = true;
+          xSemaphoreGive(xStateMutex);
+          saveConfig();
+        }
+        if (xControlTask) xTaskNotifyGive(xControlTask);
+      }
+    } else if (msg.indexOf("\"cmd\":\"set_config\"") >= 0) {
+      int rIdx = msg.indexOf("\"runtime\":");
+      int cIdx = msg.indexOf("\"cooldown\":");
+      int tIdx = msg.indexOf("\"telem\":");
+      int bIdx = msg.indexOf("\"boot_auto\":");
+      if (rIdx >= 0) {
+        uint32_t v = msg.substring(rIdx + 10).toInt();
+        if (v >= CFG_RUNTIME_MIN_MS && v <= CFG_RUNTIME_MAX_MS) gConfig.pump_min_runtime_ms = v;
+      }
+      if (cIdx >= 0) {
+        uint32_t v = msg.substring(cIdx + 11).toInt();
+        if (v >= CFG_COOLDOWN_MIN_MS && v <= CFG_COOLDOWN_MAX_MS) gConfig.pump_min_cooldown_ms = v;
+      }
+      if (tIdx >= 0) {
+        uint32_t v = msg.substring(tIdx + 8).toInt();
+        if (v >= CFG_TELEM_MIN_MS && v <= CFG_TELEM_MAX_MS) gConfig.telemetry_interval_ms = v;
+      }
+      if (bIdx >= 0) {
+        uint8_t v = msg.substring(bIdx + 12).toInt();
+        if (v <= 1) gConfig.boot_auto_mode = v;
+      }
+      saveConfig(true);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Config Saved to Flash!\",\"is_err\":false}");
+      sendConfigWs(num);
+    } else if (msg.indexOf("\"cmd\":\"defaults\"") >= 0) {
+      resetConfigToDefaults();
+      saveConfig(true);
+      sendConfigWs(num);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Defaults Restored!\",\"is_err\":false}");
+    } else if (msg.indexOf("\"cmd\":\"reboot\"") >= 0) {
+      saveStats();
+      saveConfig(true);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Rebooting device...\",\"is_err\":false}");
+      vTaskDelay(pdMS_TO_TICKS(500));
+      esp_restart();
+    }
+  }
+}
+
+static void startDebugWeb() {
+  if (gDebugServerRunning) return;
+  LittleFS.begin(true);
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(DEBUG_WIFI_SSID, DEBUG_WIFI_PASS);
+  dnsServer.start(53, "*", WiFi.softAPIP());
+
+  httpServer.on("/", HTTP_GET, []() {
+    if (LittleFS.exists("/index.html")) {
+      File f = LittleFS.open("/index.html", "r");
+      httpServer.streamFile(f, "text/html");
+      f.close();
+    } else {
+      httpServer.send_P(200, "text/html", PAGE_INDEX_FALLBACK);
+    }
+  });
+
+  httpServer.on("/style.css", HTTP_GET, []() {
+    if (LittleFS.exists("/style.css")) {
+      File f = LittleFS.open("/style.css", "r");
+      httpServer.streamFile(f, "text/css");
+      f.close();
+    } else {
+      httpServer.send(200, "text/css", "");
+    }
+  });
+
+  httpServer.on("/app.js", HTTP_GET, []() {
+    if (LittleFS.exists("/app.js")) {
+      File f = LittleFS.open("/app.js", "r");
+      httpServer.streamFile(f, "application/javascript");
+      f.close();
+    } else {
+      httpServer.send(200, "application/javascript", "");
+    }
+  });
+
+  httpServer.on("/api/status", HTTP_GET, []() {
+    char buf[384];
+    uint8_t wl = 0, ec = 0;
+    bool am = false, pond = false, demand = false;
+    bool ps[3] = {};
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      wl = gState.waterLevel; am = gState.autoMode; pond = gState.pond;
+      demand = gState.demandActive; ec = gState.errorCode;
+      for (int i=0; i<3; i++) ps[i] = gState.pumpState[i];
+      xSemaphoreGive(xStateMutex);
+    }
+    snprintf(buf, sizeof(buf),
+      "{\"wl\":%u,\"mode\":\"%s\",\"pumps\":[%d,%d,%d],\"pond\":%d,\"demand\":%d,\"err\":%u,\"uptime\":%lu}",
+      wl, am?"AUTO":"MAN", ps[0], ps[1], ps[2], pond, demand, ec, (unsigned long)(millis()/1000));
+    httpServer.send(200, "application/json", buf);
+  });
+
+  httpServer.onNotFound([]() {
+    httpServer.sendHeader("Location", "/", true);
+    httpServer.send(302, "text/plain", "");
+  });
+
+  httpServer.begin();
+  wsServer.begin();
+  wsServer.onEvent(onWebSocketEvent);
+
+  gDebugServerRunning = true;
+  Serial.printf("\n[DebugWeb] Hotspot online! SSID='%s' Pass='%s' IP=%s\n",
+                DEBUG_WIFI_SSID, DEBUG_WIFI_PASS, WiFi.softAPIP().toString().c_str());
+  Serial.println("[DebugWeb] Connect to http://192.168.4.1 in your browser.");
+}
+
+static void stopDebugWeb() {
+  if (!gDebugServerRunning) return;
+  wsServer.close();
+  httpServer.stop();
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  gDebugServerRunning = false;
+  Serial.println("\n[DebugWeb] Hotspot stopped & WiFi powered OFF.");
+}
+
+static void Task_DebugWebServer(void *) {
+  for (;;) {
+    if (gDebugServerWanted != gDebugServerRunning) {
+      if (gDebugServerWanted) startDebugWeb();
+      else stopDebugWeb();
+    }
+
+    if (gDebugServerRunning) {
+      dnsServer.processNextRequest();
+      httpServer.handleClient();
+      wsServer.loop();
+
+      uint32_t now = millis();
+      static uint32_t lastWsBc = 0;
+      if (now - lastWsBc >= WS_BROADCAST_INTERVAL_MS) {
+        lastWsBc = now;
+        broadcastTelemetryWs();
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+#endif
 
 // ─── Input sensor task (Core 1, Pri 3) ────────────────────────────────────────
 static void Task_InputSensorPoll(void *) {
@@ -842,7 +1113,24 @@ static void Task_SerialConsole(void *) {
         Serial.println();
 
         if (cmd == "help") {
-          Serial.println("help | status | radio | config | stats | tx | auto | manual | p1 | p2 | p3 | pond | reboot");
+          Serial.println("Commands:");
+          Serial.println("  status                  - Display real-time telemetry and state");
+          Serial.println("  radio                   - Display RSSI, SNR, LoRa status");
+          Serial.println("  config                  - Display active configuration");
+          Serial.println("  stats                   - Display pump runtime stats and boot count");
+          Serial.println("  tx                      - Enqueue manual LoRa status packet");
+          Serial.println("  auto | manual           - Switch operation mode");
+          Serial.println("  p1 | p2 | p3 | pond     - Pulse manual toggle buttons");
+          Serial.println("  debug [on|off]          - Enable or disable WiFi AP & WebSocket dashboard");
+          Serial.println("  set runtime <ms>        - Set pump min runtime (1000 - 300000 ms)");
+          Serial.println("  set cooldown <ms>       - Set pump min cooldown (5000 - 600000 ms)");
+          Serial.println("  set telem <ms>          - Set telemetry broadcast interval (2000 - 300000 ms)");
+          Serial.println("  set mask <p1> <p2> <p3> - Enable/disable auto pumps (e.g. set mask 1 1 0)");
+          Serial.println("  set pond <0|1>          - Enable/disable pond pump");
+          Serial.println("  set mode <auto|manual>  - Set operating mode and default boot mode");
+          Serial.println("  set defaults            - Restore factory default configuration");
+          Serial.println("  save                    - Persist configuration and stats to NVS flash");
+          Serial.println("  reboot                  - Save state and restart ESP32-S3");
         } else if (cmd == "status") {
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             Serial.printf("wl=%u auto=%d P1=%d P2=%d P3=%d (Allowed:%d;%d;%d) pond=%d err=%u rssi=%d snr=%d radio=%d pcf=%d\n",
@@ -858,11 +1146,11 @@ static void Task_SerialConsole(void *) {
             xSemaphoreGive(xStateMutex);
           }
         } else if (cmd == "config") {
-          Serial.printf("runtime=%lums cooldown=%lums telem=%lums auto=%u mask=%d;%d;%d pond=%d\n",
+          Serial.printf("runtime=%lums cooldown=%lums telem=%lums auto=%u mask=%d;%d;%d pond=%d debug=%u\n",
                         gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms,
                         gConfig.telemetry_interval_ms, gConfig.boot_auto_mode,
                         gConfig.pump_enabled_auto[0], gConfig.pump_enabled_auto[1], gConfig.pump_enabled_auto[2],
-                        gConfig.pond_enabled);
+                        gConfig.pond_enabled, gConfig.debug_mode_enabled);
         } else if (cmd == "stats") {
           Serial.printf("P1=%lus P2=%lus P3=%lus boots=%lu\n", gStats.runtime_p1_s,
                         gStats.runtime_p2_s, gStats.runtime_p3_s, gStats.boot_count);
@@ -907,6 +1195,118 @@ static void Task_SerialConsole(void *) {
           }
           if (xControlTask) xTaskNotifyGive(xControlTask);
           Serial.printf("Injected %s edge\n", cmd.c_str());
+        } else if (cmd == "debug" || cmd == "debug on" || cmd == "debug 1") {
+#if ENABLE_DEBUG_WEB
+          gDebugServerWanted = true;
+          gConfig.debug_mode_enabled = 1;
+          saveConfig(true);
+          Serial.println("Debug mode: ENABLED (AP: TankNode-Debug, IP: 192.168.4.1)");
+#else
+          Serial.println("Debug web interface disabled in build.");
+#endif
+        } else if (cmd == "debug off" || cmd == "debug 0") {
+#if ENABLE_DEBUG_WEB
+          gDebugServerWanted = false;
+          gConfig.debug_mode_enabled = 0;
+          saveConfig(true);
+          Serial.println("Debug mode: DISABLED (WiFi powered OFF)");
+#else
+          Serial.println("Debug web interface disabled in build.");
+#endif
+        } else if (cmd.startsWith("set runtime ")) {
+          uint32_t val = cmd.substring(12).toInt();
+          if (val >= CFG_RUNTIME_MIN_MS && val <= CFG_RUNTIME_MAX_MS) {
+            gConfig.pump_min_runtime_ms = val;
+            saveConfig(true);
+            Serial.printf("Config: pump_min_runtime_ms set to %lu ms\n", (unsigned long)val);
+          } else {
+            Serial.printf("Invalid runtime (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_RUNTIME_MIN_MS, CFG_RUNTIME_MAX_MS);
+          }
+        } else if (cmd.startsWith("set cooldown ")) {
+          uint32_t val = cmd.substring(13).toInt();
+          if (val >= CFG_COOLDOWN_MIN_MS && val <= CFG_COOLDOWN_MAX_MS) {
+            gConfig.pump_min_cooldown_ms = val;
+            saveConfig(true);
+            Serial.printf("Config: pump_min_cooldown_ms set to %lu ms\n", (unsigned long)val);
+          } else {
+            Serial.printf("Invalid cooldown (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_COOLDOWN_MIN_MS, CFG_COOLDOWN_MAX_MS);
+          }
+        } else if (cmd.startsWith("set telem ")) {
+          uint32_t val = cmd.substring(10).toInt();
+          if (val >= CFG_TELEM_MIN_MS && val <= CFG_TELEM_MAX_MS) {
+            gConfig.telemetry_interval_ms = val;
+            saveConfig(true);
+            Serial.printf("Config: telemetry_interval_ms set to %lu ms\n", (unsigned long)val);
+          } else {
+            Serial.printf("Invalid telemetry interval (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_TELEM_MIN_MS, CFG_TELEM_MAX_MS);
+          }
+        } else if (cmd.startsWith("set mask ")) {
+          int p1 = -1, p2 = -1, p3 = -1;
+          if (sscanf(cmd.c_str() + 9, "%d %d %d", &p1, &p2, &p3) == 3 &&
+              (p1 == 0 || p1 == 1) && (p2 == 0 || p2 == 1) && (p3 == 0 || p3 == 1)) {
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+              gState.pumpEnabledAuto[0] = (p1 == 1);
+              gState.pumpEnabledAuto[1] = (p2 == 1);
+              gState.pumpEnabledAuto[2] = (p3 == 1);
+              gConfig.pump_enabled_auto[0] = gState.pumpEnabledAuto[0];
+              gConfig.pump_enabled_auto[1] = gState.pumpEnabledAuto[1];
+              gConfig.pump_enabled_auto[2] = gState.pumpEnabledAuto[2];
+              gState.triggerImmediateTelem = true;
+              xSemaphoreGive(xStateMutex);
+              saveConfig(true);
+            }
+            if (xControlTask) xTaskNotifyGive(xControlTask);
+            Serial.printf("Auto pump mask updated: P1=%d P2=%d P3=%d\n", p1, p2, p3);
+          } else {
+            Serial.println("Usage: set mask <0|1> <0|1> <0|1> (e.g. set mask 1 1 0)");
+          }
+        } else if (cmd.startsWith("set pond ")) {
+          int pond = cmd.substring(9).toInt();
+          if (pond == 0 || pond == 1) {
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+              gState.pond = (pond == 1);
+              gConfig.pond_enabled = gState.pond;
+              gState.triggerImmediateTelem = true;
+              xSemaphoreGive(xStateMutex);
+              saveConfig(true);
+            }
+            if (xControlTask) xTaskNotifyGive(xControlTask);
+            Serial.printf("Pond enabled: %d\n", pond);
+          } else {
+            Serial.println("Usage: set pond <0|1>");
+          }
+        } else if (cmd.startsWith("set mode ")) {
+          String m = cmd.substring(9);
+          m.toLowerCase();
+          if (m == "auto" || m == "1") {
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+              gState.autoMode = true;
+              xSemaphoreGive(xStateMutex);
+            }
+            gConfig.boot_auto_mode = 1;
+            saveConfig(true);
+            if (xControlTask) xTaskNotifyGive(xControlTask);
+            Serial.println("Mode: AUTO");
+          } else if (m == "manual" || m == "man" || m == "0") {
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+              gState.autoMode = false;
+              xSemaphoreGive(xStateMutex);
+            }
+            gConfig.boot_auto_mode = 0;
+            saveConfig(true);
+            if (xControlTask) xTaskNotifyGive(xControlTask);
+            Serial.println("Mode: MANUAL");
+          } else {
+            Serial.println("Usage: set mode <auto|manual>");
+          }
+        } else if (cmd == "set defaults" || cmd == "defaults") {
+          resetConfigToDefaults();
+          saveConfig(true);
+          Serial.println("Config reset to defaults and saved to NVS.");
+        } else if (cmd == "save") {
+          saveConfig(true);
+          saveStats();
+          Serial.println("Config and statistics committed to NVS flash.");
         } else if (cmd == "reboot") {
           saveStats();
           saveConfig(true);
@@ -992,6 +1392,13 @@ void setup() {
 
   xTaskCreatePinnedToCore(Task_LoRaManager, "LoRaMgr", STACK_LORA_MGR, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(Task_SerialConsole, "SerialCon", STACK_SERIAL_CON, NULL, 1, NULL, 0);
+#if ENABLE_DEBUG_WEB
+  gDebugServerWanted = (bool)gConfig.debug_mode_enabled;
+  xTaskCreatePinnedToCore(Task_DebugWebServer, "DebugWeb", STACK_DEBUG_WEB, NULL, 1, NULL, 0);
+  if (gDebugServerWanted) {
+    Serial.println("[Boot] Debug WebServer enabled by config.");
+  }
+#endif
   xTaskCreatePinnedToCore(Task_InputSensorPoll, "InputPoll", STACK_INPUT_POLL, NULL, 3, NULL, 1);
   xTaskCreatePinnedToCore(Task_ControlEngine, "CtrlEng", STACK_CTRL_ENG, NULL, 4, &xControlTask, 1);
   xTaskCreatePinnedToCore(Task_UIAnimation, "LED_UI", STACK_LED_UI, NULL, 1, NULL, 1);

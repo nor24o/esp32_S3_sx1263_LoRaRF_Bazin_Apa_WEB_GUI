@@ -32,7 +32,7 @@
 #define NODE_POND         0x03
 #define NODE_BROADCAST    0xFF
 #define MY_NODE_ID        NODE_TANK
-#define CONFIG_VERSION    35    // Updated structural configuration version for parallel irrigation logic
+#define CONFIG_VERSION    36    // Added debug_mode_enabled field
 
 // StatusPayload flags byte (TX)
 #define STATUS_BIT_AUTO   0x01  // auto mode active
@@ -140,6 +140,15 @@
 #define STACK_CTRL_ENG      6144
 #define STACK_LED_UI        4096
 #define STACK_READ_SENSOR   4096
+#define STACK_DEBUG_WEB     8192
+
+// ─── Debug Web / WiFi Hotspot ────────────────────────────────────────────────
+#define ENABLE_DEBUG_WEB               true
+#define DEBUG_WIFI_SSID                "TankNode-Debug"
+#define DEBUG_WIFI_PASS                "12345678"
+#define DEBUG_HTTP_PORT                80
+#define DEBUG_WS_PORT                  81
+#define WS_BROADCAST_INTERVAL_MS       500UL
 
 // ─── RTOS queue depths ────────────────────────────────────────────────────────
 #define RXQUEUE_DEPTH          8
