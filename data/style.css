@@ -1103,3 +1103,235 @@ body {
   from { transform: translateX(100%); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
+
+/* ─── LIVE SYSTEM I/O & PARAMETERS MATRIX ─────────────────────── */
+.matrix-card {
+  margin-top: 20px;
+  padding: 20px;
+  background: rgba(13, 20, 36, 0.85);
+  border: 1px solid rgba(0, 240, 255, 0.2);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), inset 0 0 20px rgba(0, 240, 255, 0.03);
+}
+
+.matrix-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+}
+
+.matrix-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.matrix-icon {
+  font-size: 1.5rem;
+  color: var(--amber);
+  filter: drop-shadow(0 0 8px var(--amber-glow));
+}
+
+.matrix-header h3 {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #f1f5f9;
+  margin: 0;
+}
+
+.matrix-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin: 2px 0 0 0;
+}
+
+.matrix-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.matrix-live-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--green);
+  background: rgba(0, 255, 136, 0.1);
+  border: 1px solid rgba(0, 255, 136, 0.3);
+  padding: 4px 10px;
+  border-radius: 20px;
+}
+
+.matrix-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: pulseDot 1s infinite alternate;
+}
+
+.matrix-toggle-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--cyan);
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.matrix-toggle-btn:hover {
+  background: rgba(0, 240, 255, 0.15);
+  border-color: var(--cyan);
+}
+
+.matrix-content {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  transition: all 0.3s ease-in-out;
+}
+
+.matrix-content.collapsed {
+  display: none;
+}
+
+.matrix-subcard {
+  background: rgba(10, 15, 28, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.subcard-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding-bottom: 8px;
+}
+
+.subcard-icon {
+  font-size: 1rem;
+}
+
+.subcard-title h4 {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #94a3b8;
+  letter-spacing: 0.05em;
+  margin: 0;
+  flex: 1;
+}
+
+.subcard-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  background: rgba(255, 255, 255, 0.07);
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: var(--cyan);
+}
+
+.matrix-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.matrix-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 0.73rem;
+  font-family: var(--font-mono);
+  transition: background 0.15s;
+}
+
+.matrix-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.matrix-row.highlight {
+  background: rgba(0, 240, 255, 0.05);
+  border: 1px solid rgba(0, 240, 255, 0.15);
+  margin-top: 4px;
+}
+
+.m-col-pin {
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 600;
+  width: 75px;
+  flex-shrink: 0;
+}
+
+.m-col-name {
+  color: #cbd5e1;
+  flex: 1;
+  padding: 0 6px;
+}
+
+.m-col-val {
+  font-weight: 600;
+  text-align: right;
+}
+
+.badge-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+}
+
+.badge-tag.submerged, .badge-tag.running, .badge-tag.active {
+  background: rgba(0, 255, 136, 0.15);
+  color: var(--green);
+  border: 1px solid rgba(0, 255, 136, 0.4);
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.2);
+}
+
+.badge-tag.pressed {
+  background: rgba(255, 170, 0, 0.2);
+  color: var(--amber);
+  border: 1px solid rgba(255, 170, 0, 0.5);
+}
+
+.badge-tag.ok {
+  background: rgba(0, 240, 255, 0.15);
+  color: var(--cyan);
+  border: 1px solid rgba(0, 240, 255, 0.3);
+}
+
+.badge-tag.fault, .badge-tag.alert {
+  background: rgba(255, 51, 102, 0.2);
+  color: var(--red);
+  border: 1px solid rgba(255, 51, 102, 0.5);
+  animation: pulseDot 0.8s infinite alternate;
+}
+
+.badge-tag.idle {
+  background: rgba(255, 255, 255, 0.05);
+  color: #64748b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}

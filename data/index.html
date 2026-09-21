@@ -35,6 +35,7 @@
           <span class="badge-icon">⏱️</span>
           <span id="badgeUptime">Up: 0s</span>
         </div>
+        <button class="icon-btn" id="btnMatrixHeader" onclick="toggleMatrix()" title="Toggle Live Parameters & I/O Matrix">📊</button>
         <button class="icon-btn" id="btnAudioToggle" title="Toggle Sound FX">🔊</button>
         <button class="icon-btn" id="btnSettingsOpen" title="Settings & Network">⚙️</button>
       </div>
@@ -236,6 +237,214 @@
         </div>
       </section>
     </main>
+
+    <!-- Comprehensive Live I/O, Actuators & Parameters SCADA Inspector Matrix -->
+    <section class="matrix-card glass-card" id="ioMatrixSection">
+      <div class="matrix-header">
+        <div class="matrix-title-group">
+          <span class="matrix-icon">⚡</span>
+          <div>
+            <h3>LIVE SYSTEM I/O & PARAMETERS MATRIX</h3>
+            <p class="matrix-sub">Real-time hardware registers, digital pin states, sensor readings & NVS parameters</p>
+          </div>
+        </div>
+        <div class="matrix-header-right">
+          <span class="matrix-live-pill"><span class="matrix-pulse"></span>LIVE (500ms)</span>
+          <button class="matrix-toggle-btn" id="btnToggleMatrix" onclick="toggleMatrix()">COLLAPSE</button>
+        </div>
+      </div>
+
+      <div class="matrix-content" id="matrixContent">
+        <!-- 1. Physical Digital Inputs (PCF8574 Port 0x27) -->
+        <div class="matrix-subcard">
+          <div class="subcard-title">
+            <span class="subcard-icon">🔌</span>
+            <h4>PHYSICAL INPUTS (PCF8574 @ 0x27)</h4>
+            <span class="subcard-badge" id="mPcfRaw">0xFF (0b11111111)</span>
+          </div>
+          <div class="matrix-table">
+            <div class="matrix-row">
+              <span class="m-col-pin">P0 (Bit 0)</span>
+              <span class="m-col-name">Float Switch Level 1</span>
+              <span class="m-col-val" id="mFloat1"><span class="badge-tag idle">DRY (1)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">P1 (Bit 1)</span>
+              <span class="m-col-name">Float Switch Level 2</span>
+              <span class="m-col-val" id="mFloat2"><span class="badge-tag idle">DRY (1)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">P2 (Bit 2)</span>
+              <span class="m-col-name">Float Switch Level 3</span>
+              <span class="m-col-val" id="mFloat3"><span class="badge-tag idle">DRY (1)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">P3 (Bit 3)</span>
+              <span class="m-col-name">Button: Mode Switch</span>
+              <span class="m-col-val" id="mBtnMode"><span class="badge-tag idle">IDLE (1)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">P4 (Bit 4)</span>
+              <span class="m-col-name">Button: Pump 1 Toggle</span>
+              <span class="m-col-val" id="mBtnP1"><span class="badge-tag idle">IDLE (1)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">P5 (Bit 5)</span>
+              <span class="m-col-name">Button: Pump 2 Toggle</span>
+              <span class="m-col-val" id="mBtnP2"><span class="badge-tag idle">IDLE (1)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">P6 (Bit 6)</span>
+              <span class="m-col-name">Button: Pump 3 Toggle</span>
+              <span class="m-col-val" id="mBtnP3"><span class="badge-tag idle">IDLE (1)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">P7 (Bit 7)</span>
+              <span class="m-col-name">Button: Pond Refill</span>
+              <span class="m-col-val" id="mBtnPond"><span class="badge-tag idle">IDLE (1)</span></span>
+            </div>
+            <div class="matrix-row highlight">
+              <span class="m-col-pin">FILTER</span>
+              <span class="m-col-name">Debounced Level / Plausibility</span>
+              <span class="m-col-val" id="mPlausibility"><span class="badge-tag ok">VALID (L:0)</span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Physical Actuators & Outputs (Relays & GPIO) -->
+        <div class="matrix-subcard">
+          <div class="subcard-title">
+            <span class="subcard-icon">⚡</span>
+            <h4>PHYSICAL ACTUATORS & RELAYS</h4>
+            <span class="subcard-badge">ACTIVE-LOW OPTO</span>
+          </div>
+          <div class="matrix-table">
+            <div class="matrix-row">
+              <span class="m-col-pin">GPIO 47</span>
+              <span class="m-col-name">Outflow Pump 1 Relay</span>
+              <span class="m-col-val" id="mRelay1"><span class="badge-tag idle">OFF (HIGH)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">GPIO 41</span>
+              <span class="m-col-name">Outflow Pump 2 Relay</span>
+              <span class="m-col-val" id="mRelay2"><span class="badge-tag idle">OFF (HIGH)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">GPIO 39</span>
+              <span class="m-col-name">Outflow Pump 3 Relay</span>
+              <span class="m-col-val" id="mRelay3"><span class="badge-tag idle">OFF (HIGH)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">LoRa 0x03</span>
+              <span class="m-col-name">Remote Pond Pump Demand</span>
+              <span class="m-col-val" id="mPondDemand"><span class="badge-tag idle">IDLE</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">GPIO 48</span>
+              <span class="m-col-name">WS2812B Diagnostic Strip</span>
+              <span class="m-col-val" id="mNeoPixels"><span class="badge-tag ok">10x LEDs ACTIVE</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">TIMERS</span>
+              <span class="m-col-name">Anti-Chatter Timers (P1/P2/P3)</span>
+              <span class="m-col-val" id="mTimers"><span class="badge-tag">No Active Lock</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">LIFETIME</span>
+              <span class="m-col-name">Pump Cumulative Runtime</span>
+              <span class="m-col-val" id="mLifetime">P1:0s P2:0s P3:0s</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Radio & Sensor Metrics -->
+        <div class="matrix-subcard">
+          <div class="subcard-title">
+            <span class="subcard-icon">📡</span>
+            <h4>RADIO & ENVIRONMENT</h4>
+            <span class="subcard-badge">EU868 (868.1 MHz)</span>
+          </div>
+          <div class="matrix-table">
+            <div class="matrix-row">
+              <span class="m-col-pin">SPI (FSPI)</span>
+              <span class="m-col-name">SX1262 LoRa Transceiver</span>
+              <span class="m-col-val" id="mRadioHealth"><span class="badge-tag ok">ONLINE</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">METRICS</span>
+              <span class="m-col-name">Packet RSSI / SNR</span>
+              <span class="m-col-val" id="mRadioMetrics">-- dBm / -- dB</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">NODES</span>
+              <span class="m-col-name">Tank: 0x02 | GW: 0x01 | Pond: 0x03</span>
+              <span class="m-col-val"><span class="badge-tag ok">CONFIGURED</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">ENV</span>
+              <span class="m-col-name">Ambient Temperature</span>
+              <span class="m-col-val" id="mTemp">--.- °C</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">ENV</span>
+              <span class="m-col-name">Relative Humidity</span>
+              <span class="m-col-val" id="mHum">-- % RH</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">I²C BUS</span>
+              <span class="m-col-name">SDA: GPIO 1 | SCL: GPIO 2</span>
+              <span class="m-col-val" id="mI2cBus"><span class="badge-tag ok">100 kHz OK</span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. System Health & NVS Parameters -->
+        <div class="matrix-subcard">
+          <div class="subcard-title">
+            <span class="subcard-icon">🧠</span>
+            <h4>MCU HEALTH & NVS CONFIG</h4>
+            <span class="subcard-badge">ESP32-S3</span>
+          </div>
+          <div class="matrix-table">
+            <div class="matrix-row">
+              <span class="m-col-pin">CPU / RAM</span>
+              <span class="m-col-name">240 MHz Dual Core / Free Heap</span>
+              <span class="m-col-val" id="mMcuHeap">-- KB (Min: -- KB)</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">BOOT / UP</span>
+              <span class="m-col-name">Boot Counter / System Uptime</span>
+              <span class="m-col-val" id="mMcuUptime">#0 | 0s</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">WI-FI</span>
+              <span class="m-col-name">SoftAP IP & Clients</span>
+              <span class="m-col-val" id="mSoftApInfo">192.168.4.1 (0 clients)</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">STATION</span>
+              <span class="m-col-name">Home Wi-Fi (STA) & RSSI</span>
+              <span class="m-col-val" id="mStaInfo">Disconnected</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">mDNS</span>
+              <span class="m-col-name">Local Hostname</span>
+              <span class="m-col-val"><a href="http://tanknode.local" target="_blank" style="color:var(--cyan);text-decoration:none;">http://tanknode.local</a></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">NVS CFG</span>
+              <span class="m-col-name">Runtime / Cooldown / Telem</span>
+              <span class="m-col-val" id="mNvsTimers">20s / 20s / 30s</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">MASKS</span>
+              <span class="m-col-name">Auto Pumps Allowed [P1, P2, P3]</span>
+              <span class="m-col-val" id="mAutoMasks">[1, 1, 1]</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- Bottom Diagnostics Bar -->
     <footer class="hud-footer glass-card">

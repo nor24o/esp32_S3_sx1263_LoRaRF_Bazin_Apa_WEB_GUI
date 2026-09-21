@@ -85,6 +85,8 @@ struct PumpHysteresis {
 // ─── Shared system state (protected by xStateMutex) ───────────────────────────
 struct SystemState {
   uint8_t waterLevel = 0;
+  uint8_t rawWaterLevel = 0;
+  uint8_t pcfRaw = 0xFF;
   bool autoMode = false;
   bool pumpState[3] = {};
   bool pumpEnabledAuto[3] = {false, false, false}; 
@@ -106,6 +108,8 @@ struct SystemState {
   bool waterLevelValid = false; 
   bool demandActive = false;          // Mirrors tank charging cycle state
   bool triggerImmediateTelem = false; // Flag to send status telemetry immediately
+  uint32_t pumpLastOn[3] = {};
+  uint32_t pumpLastOff[3] = {};
 };
 
 static LocalConfig gConfig;
@@ -316,26 +320,48 @@ static bool gDebugServerWanted = false;
 
 static void broadcastTelemetryWs() {
   if (!gDebugServerRunning) return;
-  char buf[384];
-  uint8_t wl = 0, ec = 0;
-  bool am = false, pond = false, demand = false, pcfOk = false;
+  char buf[896];
+  uint8_t wl = 0, raw_wl = 0, pcf_raw = 0xFF, ec = 0;
+  bool am = false, pond = false, demand = false, pcfOk = false, wlValid = false, radioOk = false;
   bool ps[3] = {}, pea[3] = {};
+  uint32_t lastOn[3] = {}, lastOff[3] = {};
   int16_t rssi = 0; int8_t snr = 0;
+  int16_t temp = 0; uint8_t hum = 0;
   
   if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     wl = gState.waterLevel;
+    raw_wl = gState.rawWaterLevel;
+    pcf_raw = gState.pcfRaw;
+    wlValid = gState.waterLevelValid;
     am = gState.autoMode;
     pond = gState.pond;
     demand = gState.demandActive;
     ec = gState.errorCode;
     pcfOk = gState.pcfOk;
+    radioOk = gState.radioOk;
+    temp = gState.temperature;
+    hum = gState.humidity;
     for (int i = 0; i < 3; i++) {
       ps[i] = gState.pumpState[i];
       pea[i] = gState.pumpEnabledAuto[i];
+      lastOn[i] = gState.pumpLastOn[i];
+      lastOff[i] = gState.pumpLastOff[i];
     }
     rssi = gState.lastRssi;
     snr = gState.lastSnr;
     xSemaphoreGive(xStateMutex);
+  }
+
+  uint32_t now = millis();
+  uint32_t runLeft[3] = {}, cdLeft[3] = {};
+  for (int i = 0; i < 3; i++) {
+    if (ps[i] && lastOn[i] > 0) {
+      uint32_t el = now - lastOn[i];
+      if (el < gConfig.pump_min_runtime_ms) runLeft[i] = (gConfig.pump_min_runtime_ms - el) / 1000;
+    } else if (!ps[i] && lastOff[i] > 0) {
+      uint32_t el = now - lastOff[i];
+      if (el < gConfig.pump_min_cooldown_ms) cdLeft[i] = (gConfig.pump_min_cooldown_ms - el) / 1000;
+    }
   }
 
   const char *errStr = "NONE";
@@ -344,17 +370,43 @@ static void broadcastTelemetryWs() {
   else if (ec == ERR_GATEWAY_TIMEOUT) errStr = "GATEWAY TIMEOUT";
   else if (ec == ERR_FLOAT_PLAUSIBILITY) errStr = "FLOAT PLAUSIBILITY FAULT";
 
+  uint8_t f1 = (pcf_raw & 0x01) ? 1 : 0; // 0=submerged, 1=dry
+  uint8_t f2 = (pcf_raw & 0x02) ? 1 : 0;
+  uint8_t f3 = (pcf_raw & 0x04) ? 1 : 0;
+  uint8_t bMode = (pcf_raw & 0x08) ? 1 : 0; // 0=pressed, 1=idle
+  uint8_t bP1 = (pcf_raw & 0x10) ? 1 : 0;
+  uint8_t bP2 = (pcf_raw & 0x20) ? 1 : 0;
+  uint8_t bP3 = (pcf_raw & 0x40) ? 1 : 0;
+  uint8_t bPond = (pcf_raw & 0x80) ? 1 : 0;
+
   snprintf(buf, sizeof(buf),
-    "{\"type\":\"telemetry\",\"wl\":%u,\"mode\":\"%s\",\"pumps\":[%d,%d,%d],"
-    "\"auto_mask\":[%d,%d,%d],\"pond\":%d,\"demand\":%d,\"err\":%u,\"err_str\":\"%s\","
-    "\"rssi\":%d,\"snr\":%d,\"heap\":%lu,\"uptime\":%lu,\"boots\":%lu,\"pcf_ok\":%d,"
-    "\"sta\":%d,\"sta_ip\":\"%s\"}",
-    wl, am ? "AUTO" : "MAN", ps[0], ps[1], ps[2],
-    pea[0], pea[1], pea[2], pond, demand, ec, errStr,
-    rssi, snr, (unsigned long)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
-    (unsigned long)gStats.boot_count, pcfOk ? 1 : 0,
+    "{\"type\":\"telemetry\",\"wl\":%u,\"raw_wl\":%u,\"wl_valid\":%d,\"mode\":\"%s\","
+    "\"pcf_raw\":%u,\"pcf_ok\":%d,\"floats\":[%u,%u,%u],\"buttons\":[%u,%u,%u,%u,%u],"
+    "\"pumps\":[%d,%d,%d],\"pins\":[%d,%d,%d],\"auto_mask\":[%d,%d,%d],"
+    "\"run_left\":[%lu,%lu,%lu],\"cd_left\":[%lu,%lu,%lu],"
+    "\"rt_stats\":[%lu,%lu,%lu],\"pond\":%d,\"demand\":%d,\"err\":%u,\"err_str\":\"%s\","
+    "\"temp\":%.1f,\"hum\":%u,\"rssi\":%d,\"snr\":%d,\"radio_ok\":%d,"
+    "\"heap\":%lu,\"min_heap\":%lu,\"cpu_mhz\":%u,\"uptime\":%lu,\"boots\":%lu,"
+    "\"sta\":%d,\"sta_ip\":\"%s\",\"sta_rssi\":%d,\"ap_clients\":%u,"
+    "\"cfg_runtime\":%lu,\"cfg_cooldown\":%lu,\"cfg_telem\":%lu,\"always_on\":%u}",
+    wl, raw_wl, wlValid ? 1 : 0, am ? "AUTO" : "MAN",
+    pcf_raw, pcfOk ? 1 : 0, f1, f2, f3, bMode, bP1, bP2, bP3, bPond,
+    ps[0], ps[1], ps[2], RELAY_P1, RELAY_P2, RELAY_P3, pea[0], pea[1], pea[2],
+    (unsigned long)runLeft[0], (unsigned long)runLeft[1], (unsigned long)runLeft[2],
+    (unsigned long)cdLeft[0], (unsigned long)cdLeft[1], (unsigned long)cdLeft[2],
+    (unsigned long)gStats.runtime_p1_s, (unsigned long)gStats.runtime_p2_s, (unsigned long)gStats.runtime_p3_s,
+    pond ? 1 : 0, demand ? 1 : 0, ec, errStr,
+    temp / 10.0, hum, rssi, snr, radioOk ? 1 : 0,
+    (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(), (unsigned)ESP.getCpuFreqMHz(),
+    (unsigned long)(millis() / 1000), (unsigned long)gStats.boot_count,
     WiFi.status() == WL_CONNECTED ? 1 : 0,
-    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : ""
+    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "",
+    WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+    (unsigned)WiFi.softAPgetStationNum(),
+    (unsigned long)gConfig.pump_min_runtime_ms,
+    (unsigned long)gConfig.pump_min_cooldown_ms,
+    (unsigned long)gConfig.telemetry_interval_ms,
+    gConfig.web_always_on
   );
   wsServer.broadcastTXT(buf);
 }
@@ -730,6 +782,8 @@ static void Task_InputSensorPoll(void *) {
     prevBtns = curr;
 
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      gState.pcfRaw = curr;
+      gState.rawWaterLevel = rawLvl;
       if (!plausibilityOk) {
         gState.waterLevelValid = false;
         gState.errorCode = ERR_FLOAT_PLAUSIBILITY;
@@ -1014,7 +1068,11 @@ static void Task_ControlEngine(void *) {
     }
 
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-      for (int i = 0; i < 3; i++) gState.pumpState[i] = ph[i]->state;
+      for (int i = 0; i < 3; i++) {
+        gState.pumpState[i] = ph[i]->state;
+        gState.pumpLastOn[i] = ph[i]->lastOnTime;
+        gState.pumpLastOff[i] = ph[i]->lastOffTime;
+      }
       gState.pond = gConfig.pond_enabled;
       gState.demandActive = systemDemandOn;
       xSemaphoreGive(xStateMutex);

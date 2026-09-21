@@ -255,6 +255,13 @@ The ESP32-S3 hosts a full-featured real-time Cyberpunk / SCADA glassmorphic dash
 8. **Auto Pump Mask Configuration**: Checkbox selectors to include/exclude specific pumps in automatic irrigation cycles.
 9. **Runtime Configuration Inputs**: Dynamic input forms to adjust `Pump Min Runtime`, `Pump Cooldown`, and `Telemetry Interval` with live validation and Flash save confirmation toasts.
 10. **Slide-Out Configuration Drawer**: Clean gear icon toggle revealing Wi-Fi STA setup, always-on toggles, and safety timings.
+11. **Live System I/O & Parameters SCADA Matrix**:
+    - **Header Quick Toggle**: Click `[📊]` to instantly show or collapse the live inspector matrix.
+    - **Physical Digital Inputs Table**: Real-time PCF8574 raw port byte (`0x..` / `0b........`), individual contact status for Float 1, Float 2, Float 3 (`SUBMERGED (0)` / `DRY (1)`), individual push buttons (`PRESSED (0)` / `IDLE (1)`), debounced level vs raw level, and sensor plausibility health.
+    - **Physical Actuators & Relays Table**: Direct pin levels for GPIO 47, 41, 39 (`LOW=RUNNING` / `HIGH=IDLE`), remaining anti-chatter runtime lock and cooldown countdown timers, total lifetime run seconds, and remote pond refill demand latch.
+    - **Radio & Sensors Table**: SX1262 SPI health, EU868 RF parameters, live packet RSSI/SNR, ambient temperature, relative humidity, and I²C bus clock health.
+    - **MCU & System Health Table**: ESP32-S3 240 MHz dual-core clock, free heap and minimum watermark, system uptime, boot count, connected SoftAP station count, Wi-Fi Station IP/RSSI, and mDNS link (`http://tanknode.local`).
+    - **NVS Configuration Table**: Live view of stored minimum runtime, cooldown, telemetry broadcast interval, and automatic pump masks.
 
 ### Dual Serving Architecture (LittleFS + Embedded Fallback)
 The web assets are separated into clean, modern files inside `data/`:
@@ -306,7 +313,12 @@ pio device monitor -b 921600 -p COM3
    - `/pond status` - Displays simulator state, relay status, running time, and total liters delivered.
    - `/pond sim <on|off>` - Enables or disables the autonomous pond simulator.
 
-### Running the Gateway Station
+### Dedicated Terminal Launcher
+To launch a dedicated, standalone interactive terminal window for `run.py` with custom window title and UTF-8 encoding:
+```powershell
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd 'c:\Users\horva\Documents\PlatformIO\Projects\esp32_S3_sx1263_LoRaRF_Bazin_Apa'; python run.py"
+```
+Or directly from any command prompt:
 ```bash
 python run.py
 ```

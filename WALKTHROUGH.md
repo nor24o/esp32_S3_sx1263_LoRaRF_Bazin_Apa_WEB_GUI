@@ -65,9 +65,18 @@ We upgraded the firmware for the **ESP32-S3 + SX1262 Tank Node** ("Bazin Apă") 
   - `data/index.html`: Complete glassmorphic HUD layout with animated header pulse, audio mute toggle, SVG reservoir tank, top inflow jet & splash ripples, 3 outflow pipes with rotating turbine impellers, float sensor buoys, pump cards with auto-mask selectors, pond card, 40-point sparkline canvas, and slide-out settings drawer.
   - `data/style.css`: Modern glassmorphic styles with CSS `@keyframes waveBack`, `@keyframes waveFront`, `@keyframes bubbleRise`, `@keyframes flowSlide`, `@keyframes splashRipple`, `@keyframes spinTurbine`, and `@keyframes streamRight`.
   - `data/app.js`: Web Audio API sound synthesizer (tactile clicks, relay chimes, alert tones), live 40-point sparkline canvas graph, WebSocket streaming, and dynamic setting dispatcher.
+- **Live System I/O & Parameters SCADA Matrix Panel**:
+  - Full-width real-time inspector matrix embedded into the dashboard, accessible via the header `[📊]` icon or the interactive matrix card.
+  - Streams 100% of internal hardware states, digital I/O bits, actuator pins, and NVS configuration:
+    - **Physical Digital Inputs**: Raw PCF8574 port byte (`0x.. (0b........)`), individual float switch contact states (L1/L2/L3 submerged/dry), individual push buttons (Mode, P1, P2, P3, Pond pressed/idle), debounced vs raw instantaneous water level, and sensor plausibility status.
+    - **Physical Actuators & Relays**: GPIO 47 (P1), GPIO 41 (P2), GPIO 39 (P3) pin levels and logic states, anti-chatter minimum runtime and cooldown remaining lock timers, pump cumulative lifetime runtimes, remote pond demand active latch, and NeoPixel LED strip state.
+    - **Radio & Sensors**: LoRa SX1262 SPI health, EU868 carrier parameters, packet RSSI and SNR, node IDs (0x01, 0x02, 0x03), ambient temperature, humidity, and I²C bus status.
+    - **MCU & Network Health**: ESP32-S3 240 MHz dual-core clock, free heap and minimum free heap, system uptime, boot counter, SoftAP clients connected, Wi-Fi Station IP and RSSI, and mDNS link (`http://tanknode.local`).
+    - **NVS Configuration**: Stored minimum runtime, cooldown, telemetry broadcast interval, boot default mode, and automatic pump masks.
 - **Gateway Station & Autonomous Pond Simulator (`run.py`)**:
   - Telemetry parser decoding incoming `MSG_STATUS` frames from Tank Node (`0x02`).
   - Pond Node (`0x03`) Simulator intercepting refill demand packets (`MSG_CMD`), simulating pumping at 60 L/min, tracking run time and volume delivered.
+  - Dedicated console terminal launcher with automatic UTF-8 encoding configuration and custom terminal window title.
   - Interactive commands: `/tank status`, `/tank mode`, `/tank p1..p3`, `/tank pond`, `/pond sim on/off`, `/pond status`.
 
 ---

@@ -241,6 +241,9 @@ function renderTelemetry(t) {
 
   // 7. Update Sparkline Canvas
   updateSparkline(wl, t.rssi);
+
+  // 8. Render Live SCADA I/O & Parameters Matrix
+  renderMatrix(t);
 }
 
 // ─── CONFIG RENDERING ──────────────────────────────────────────────
@@ -452,3 +455,174 @@ document.addEventListener("DOMContentLoaded", () => {
 
   connectWebSocket();
 });
+
+// ─── TOGGLE LIVE MATRIX PANEL ──────────────────────────────────────
+function toggleMatrix() {
+  playClick();
+  const content = document.getElementById("matrixContent");
+  const btn = document.getElementById("btnToggleMatrix");
+  const isCollapsed = content.classList.toggle("collapsed");
+  btn.innerText = isCollapsed ? "EXPAND" : "COLLAPSE";
+}
+
+// ─── MATRIX RENDERING ──────────────────────────────────────────────
+function renderMatrix(t) {
+  // 1. Physical Inputs (PCF8574)
+  if (t.pcf_raw !== undefined) {
+    const rawByte = t.pcf_raw;
+    const hex = "0x" + rawByte.toString(16).toUpperCase().padStart(2, '0');
+    const bin = "0b" + rawByte.toString(2).padStart(8, '0');
+    const badge = document.getElementById("mPcfRaw");
+    if (badge) badge.innerText = `${hex} (${bin})`;
+
+    // Float bits: 0 = submerged, 1 = dry
+    if (t.floats) {
+      const fNames = ["mFloat1", "mFloat2", "mFloat3"];
+      t.floats.forEach((f, idx) => {
+        const el = document.getElementById(fNames[idx]);
+        if (el) {
+          const isSub = (f === 0);
+          el.innerHTML = isSub 
+            ? `<span class="badge-tag submerged">SUBMERGED (0)</span>`
+            : `<span class="badge-tag idle">DRY (1)</span>`;
+        }
+      });
+    }
+
+    // Button bits: 0 = pressed, 1 = idle
+    if (t.buttons) {
+      const bNames = ["mBtnMode", "mBtnP1", "mBtnP2", "mBtnP3", "mBtnPond"];
+      t.buttons.forEach((b, idx) => {
+        const el = document.getElementById(bNames[idx]);
+        if (el) {
+          const isPressed = (b === 0);
+          el.innerHTML = isPressed 
+            ? `<span class="badge-tag pressed">PRESSED (0)</span>`
+            : `<span class="badge-tag idle">IDLE (1)</span>`;
+        }
+      });
+    }
+  }
+
+  // Plausibility & Debounced Level
+  const plausEl = document.getElementById("mPlausibility");
+  if (plausEl) {
+    if (t.err === 4) {
+      plausEl.innerHTML = `<span class="badge-tag fault">PLAUSIBILITY FAULT</span>`;
+    } else if (t.err === 2) {
+      plausEl.innerHTML = `<span class="badge-tag fault">I²C DISCONNECTED</span>`;
+    } else {
+      const rawText = (t.raw_wl !== undefined) ? ` (Raw: L:${t.raw_wl})` : "";
+      plausEl.innerHTML = `<span class="badge-tag ok">VALID (L:${t.wl})${rawText}</span>`;
+    }
+  }
+
+  // 2. Physical Actuators & Relays
+  if (t.pumps) {
+    const rNames = ["mRelay1", "mRelay2", "mRelay3"];
+    t.pumps.forEach((p, idx) => {
+      const el = document.getElementById(rNames[idx]);
+      if (el) {
+        const isOn = Boolean(p);
+        el.innerHTML = isOn
+          ? `<span class="badge-tag running">RUNNING (LOW)</span>`
+          : `<span class="badge-tag idle">OFF (HIGH)</span>`;
+      }
+    });
+  }
+
+  const pondDemandEl = document.getElementById("mPondDemand");
+  if (pondDemandEl) {
+    pondDemandEl.innerHTML = t.demand 
+      ? `<span class="badge-tag active">ACTIVE REFILL DEMAND</span>`
+      : `<span class="badge-tag idle">IDLE</span>`;
+  }
+
+  // Timers (Runtime remaining / Cooldown remaining)
+  const timersEl = document.getElementById("mTimers");
+  if (timersEl) {
+    let timerTexts = [];
+    if (t.run_left) {
+      t.run_left.forEach((r, idx) => {
+        if (r > 0) timerTexts.push(`P${idx+1} RunLock:${r}s`);
+      });
+    }
+    if (t.cd_left) {
+      t.cd_left.forEach((c, idx) => {
+        if (c > 0) timerTexts.push(`P${idx+1} Cooldown:${c}s`);
+      });
+    }
+    timersEl.innerHTML = timerTexts.length > 0 
+      ? `<span class="badge-tag pressed">${timerTexts.join(" | ")}</span>`
+      : `<span class="badge-tag idle">No Active Lock</span>`;
+  }
+
+  // Lifetime Runtimes
+  const lifetimeEl = document.getElementById("mLifetime");
+  if (lifetimeEl && t.rt_stats) {
+    lifetimeEl.innerText = `P1:${t.rt_stats[0]}s P2:${t.rt_stats[1]}s P3:${t.rt_stats[2]}s`;
+  }
+
+  // 3. Radio & Sensor Metrics
+  const radioHealthEl = document.getElementById("mRadioHealth");
+  if (radioHealthEl) {
+    radioHealthEl.innerHTML = (t.radio_ok !== 0 && t.err !== 1)
+      ? `<span class="badge-tag ok">ONLINE</span>`
+      : `<span class="badge-tag fault">RADIO FAULT</span>`;
+  }
+
+  const radioMetricsEl = document.getElementById("mRadioMetrics");
+  if (radioMetricsEl) {
+    radioMetricsEl.innerText = `${t.rssi} dBm / ${t.snr} dB`;
+  }
+
+  const tempEl = document.getElementById("mTemp");
+  if (tempEl && t.temp !== undefined) {
+    tempEl.innerText = `${t.temp.toFixed(1)} °C`;
+  }
+
+  const humEl = document.getElementById("mHum");
+  if (humEl && t.hum !== undefined) {
+    humEl.innerText = `${t.hum} % RH`;
+  }
+
+  // 4. MCU & Network
+  const heapEl = document.getElementById("mMcuHeap");
+  if (heapEl) {
+    const freeKb = Math.round((t.heap || 0) / 1024);
+    const minKb = Math.round((t.min_heap || 0) / 1024);
+    heapEl.innerText = `${freeKb} KB (Min: ${minKb} KB)`;
+  }
+
+  const uptimeEl = document.getElementById("mMcuUptime");
+  if (uptimeEl) {
+    uptimeEl.innerText = `#${t.boots || 0} | ${formatUptime(t.uptime || 0)}`;
+  }
+
+  const softApEl = document.getElementById("mSoftApInfo");
+  if (softApEl) {
+    softApEl.innerText = `192.168.4.1 (${t.ap_clients || 0} clients)`;
+  }
+
+  const staEl = document.getElementById("mStaInfo");
+  if (staEl) {
+    if (t.sta && t.sta_ip) {
+      const sig = (t.sta_rssi) ? ` (${t.sta_rssi} dBm)` : "";
+      staEl.innerHTML = `<span class="badge-tag ok">${t.sta_ip}${sig}</span>`;
+    } else {
+      staEl.innerHTML = `<span class="badge-tag idle">Disconnected</span>`;
+    }
+  }
+
+  // NVS Timers & Auto Masks
+  const nvsTimersEl = document.getElementById("mNvsTimers");
+  if (nvsTimersEl && t.cfg_runtime) {
+    nvsTimersEl.innerText = `${t.cfg_runtime/1000}s / ${t.cfg_cooldown/1000}s / ${t.cfg_telem/1000}s`;
+  }
+
+  const masksEl = document.getElementById("mAutoMasks");
+  if (masksEl && t.auto_mask) {
+    masksEl.innerText = `[${t.auto_mask.join(", ")}]`;
+  }
+}
+

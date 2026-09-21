@@ -6,6 +6,19 @@ import json
 import base64
 import sys
 
+# Ensure UTF-8 output and set terminal window title on Windows
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW("SX1302 LoRa Gateway Station [python run.py]")
+    except Exception:
+        pass
+
 # Import prompt_toolkit components for advanced thread-safe terminal handling
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
