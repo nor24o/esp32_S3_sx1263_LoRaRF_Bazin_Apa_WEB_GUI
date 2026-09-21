@@ -3,212 +3,325 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tank Node &bull; Reservoir &amp; Irrigation Control</title>
+  <title>Tank Node // SCADA Control Deck</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Ambient background glow particles -->
+  <div class="bg-glow"></div>
+  <div class="bg-grid"></div>
+
   <div class="app-container">
-    <!-- Header -->
-    <header class="navbar">
-      <div class="brand">
-        <span class="icon">💧</span>
-        <div>
-          <h1>Tank Node Control</h1>
-          <span class="subtitle">ESP32-S3 &bull; SX1262 LoRaRF &bull; Bazin Apă</span>
+    <!-- Top HUD Navigation Header -->
+    <header class="hud-header glass-card">
+      <div class="brand-group">
+        <div class="pulse-indicator online" id="wsIndicator"></div>
+        <div class="brand-titles">
+          <h1>TANK NODE <span class="tag">BAZIN APĂ</span></h1>
+          <p class="subtitle">ESP32-S3 + SX1262 LoRa Telemetry System</p>
         </div>
       </div>
-      <div class="header-pills">
-        <span id="wsStatus" class="badge badge-red">Disconnected</span>
-        <span id="uptimeBadge" class="badge badge-dark">Up: --</span>
-        <button id="btnToggleMode" class="btn btn-mode">Mode: --</button>
+
+      <div class="hud-badges">
+        <div class="badge" title="Connection Mode">
+          <span class="badge-icon">📡</span>
+          <span id="badgeConn">SoftAP (192.168.4.1)</span>
+        </div>
+        <div class="badge" title="LoRa Link Quality">
+          <span class="badge-icon">📶</span>
+          <span id="badgeRssi">RSSI: -- dBm</span>
+        </div>
+        <div class="badge" title="System Uptime">
+          <span class="badge-icon">⏱️</span>
+          <span id="badgeUptime">Up: 0s</span>
+        </div>
+        <button class="icon-btn" id="btnAudioToggle" title="Toggle Sound FX">🔊</button>
+        <button class="icon-btn" id="btnSettingsOpen" title="Settings & Network">⚙️</button>
       </div>
     </header>
 
-    <!-- Error Banner -->
-    <div id="errorBanner" class="alert alert-danger" style="display: none;">
-      <span class="alert-icon">⚠️</span>
-      <span id="errorMessage">System Alert</span>
-    </div>
-
     <!-- Main Grid -->
-    <main class="dashboard-grid">
-      <!-- Water Tank Visualizer Card -->
-      <section class="card tank-card">
+    <main class="main-grid">
+      <!-- Left Column: Fluid Tank Reservoir & Mechanical Simulation -->
+      <section class="reservoir-card glass-card">
         <div class="card-header">
-          <h2>Reservoir Level</h2>
-          <span id="tankLevelText" class="badge badge-cyan">Level --</span>
+          <h2>RESERVOIR SIMULATION</h2>
+          <span class="level-display" id="tankLevelText">WL: 0 (EMPTY 0%)</span>
         </div>
-        <div class="tank-visual-wrapper">
-          <div class="tank-cylinder">
-            <div id="waterFill" class="water-body" style="height: 0%;">
-              <div class="water-wave"></div>
+
+        <div class="tank-stage">
+          <!-- Inflow pipe from remote pond pump (top left) -->
+          <div class="pipe-inflow-container" id="inflowContainer">
+            <div class="pipe inflow-pipe">
+              <div class="pipe-label">INFLOW (POND)</div>
+              <div class="pipe-flow-water" id="inflowPipeWater"></div>
             </div>
-            <!-- Float Markers -->
-            <div class="float-marker m-lvl3" id="markerF3"><span>F3 (High)</span><div class="float-dot"></div></div>
-            <div class="float-marker m-lvl2" id="markerF2"><span>F2 (Mid)</span><div class="float-dot"></div></div>
-            <div class="float-marker m-lvl1" id="markerF1"><span>F1 (Low)</span><div class="float-dot"></div></div>
-            <div class="float-marker m-lvl0" id="markerF0"><span>Empty</span></div>
+            <!-- Animated Water Jet into Reservoir -->
+            <div class="water-jet" id="waterJet">
+              <div class="splash-ring"></div>
+            </div>
+          </div>
+
+          <!-- Outflow pipes to field (bottom right) -->
+          <div class="pipe-outflow-group">
+            <div class="pipe outflow-pipe" id="outflowP1">
+              <span class="p-tag">P1</span>
+              <div class="turbine" id="turbineP1"></div>
+              <div class="pipe-stream" id="streamP1"></div>
+            </div>
+            <div class="pipe outflow-pipe" id="outflowP2">
+              <span class="p-tag">P2</span>
+              <div class="turbine" id="turbineP2"></div>
+              <div class="pipe-stream" id="streamP2"></div>
+            </div>
+            <div class="pipe outflow-pipe" id="outflowP3">
+              <span class="p-tag">P3</span>
+              <div class="turbine" id="turbineP3"></div>
+              <div class="pipe-stream" id="streamP3"></div>
+            </div>
+          </div>
+
+          <!-- Physical Reservoir Tank Vessel -->
+          <div class="tank-vessel">
+            <!-- Glass reflection layer -->
+            <div class="tank-reflection"></div>
+
+            <!-- Float Switch Sensor Indicators inside the tank -->
+            <div class="sensor-buoy" id="buoyL3" style="bottom: 78%;">
+              <div class="sensor-bead" id="beadL3"></div>
+              <div class="sensor-wire"></div>
+              <span class="sensor-label">L3 (High 100%)</span>
+            </div>
+            <div class="sensor-buoy" id="buoyL2" style="bottom: 50%;">
+              <div class="sensor-bead" id="beadL2"></div>
+              <div class="sensor-wire"></div>
+              <span class="sensor-label">L2 (Mid 66%)</span>
+            </div>
+            <div class="sensor-buoy" id="buoyL1" style="bottom: 22%;">
+              <div class="sensor-bead" id="beadL1"></div>
+              <div class="sensor-wire"></div>
+              <span class="sensor-label">L1 (Low 33%)</span>
+            </div>
+
+            <!-- Dynamic Liquid Simulation Body -->
+            <div class="liquid-body" id="liquidBody" style="height: 0%;">
+              <!-- SVG Wave Crest Surface -->
+              <svg class="wave-svg" viewBox="0 0 1200 120" preserveAspectRatio="none">
+                <path class="wave-path wave-back" d="M0,40 C150,90 350,-20 500,40 C650,100 900,-10 1200,40 L1200,120 L0,120 Z"></path>
+                <path class="wave-path wave-front" d="M0,50 C200,0 450,100 650,50 C850,0 1050,90 1200,50 L1200,120 L0,120 Z"></path>
+              </svg>
+
+              <!-- Rising air bubbles inside water -->
+              <div class="bubble b1"></div>
+              <div class="bubble b2"></div>
+              <div class="bubble b3"></div>
+              <div class="bubble b4"></div>
+              <div class="bubble b5"></div>
+            </div>
+          </div>
+
+          <!-- Tank Vessel Markings Ruler -->
+          <div class="tank-ruler">
+            <span class="mark" style="bottom: 95%;">100%</span>
+            <span class="mark" style="bottom: 66%;">66%</span>
+            <span class="mark" style="bottom: 33%;">33%</span>
+            <span class="mark" style="bottom: 5%;">0%</span>
           </div>
         </div>
-        <div class="tank-meta">
-          <div class="meta-item">
-            <span class="label">Pond Refill Latch</span>
-            <span id="demandStatus" class="val val-pill">STANDBY</span>
-          </div>
-          <div class="meta-item">
-            <span class="label">Pond Pump State</span>
-            <span id="pondPumpStatus" class="val val-pill">OFF</span>
-          </div>
-          <div class="meta-item">
-            <button id="btnTogglePond" class="btn btn-sm btn-outline">Toggle Pond Pump</button>
-          </div>
+
+        <!-- Sensor Status & Fault Alert Banner -->
+        <div class="sensor-status-bar" id="sensorAlertBar">
+          <span class="sensor-status-dot" id="sensorHealthDot"></span>
+          <span id="sensorHealthText">Float switches healthy & plausible</span>
         </div>
       </section>
 
-      <!-- Pumps Control Card -->
-      <section class="card pumps-card">
-        <div class="card-header">
-          <h2>Outflow Irrigation Pumps</h2>
-          <span class="badge badge-blue">Parallel Drive</span>
+      <!-- Right Column: System Controls & Diagnostics Deck -->
+      <section class="control-deck">
+        <!-- Operation Mode Pill Switcher -->
+        <div class="mode-card glass-card">
+          <div class="mode-header">
+            <h3>OPERATION MODE</h3>
+            <span class="mode-status-text" id="modeBanner">MANUAL MODE</span>
+          </div>
+          <div class="mode-toggle-group">
+            <button class="mode-btn" id="btnModeAuto" onclick="setMode(true)">AUTOMATIC</button>
+            <button class="mode-btn active" id="btnModeMan" onclick="setMode(false)">MANUAL</button>
+          </div>
+          <p class="mode-hint" id="modeHint">Manual overrides active. Anti-chatter cooldown protection enforced.</p>
         </div>
-        <div class="pumps-list">
+
+        <!-- Irrigation Outflow Pumps (P1 - P3) -->
+        <div class="pumps-grid">
           <!-- Pump 1 -->
-          <div class="pump-row" id="pRow1">
-            <div class="pump-info">
-              <span class="pump-title">Pump 1</span>
-              <span id="p1StatePill" class="val-pill pill-off">OFF</span>
-              <span id="p1Time" class="pump-time">--</span>
-            </div>
-            <div class="pump-actions">
-              <label class="toggle-wrap" title="Enable automatic outflow in AUTO mode">
-                <input type="checkbox" id="chkAutoP1">
-                <span class="toggle-slider"></span>
-                <span class="chk-label">Auto</span>
+          <div class="pump-card glass-card" id="cardP1">
+            <div class="pump-card-header">
+              <div class="pump-title">
+                <span class="pump-indicator" id="indP1"></span>
+                <h4>PUMP 1</h4>
+              </div>
+              <label class="auto-mask-check" title="Allowed in Auto Mode">
+                <input type="checkbox" id="maskP1" onchange="updateAutoMask()">
+                <span>AUTO</span>
               </label>
-              <button id="btnP1Toggle" class="btn btn-sm btn-primary">Toggle</button>
             </div>
+            <div class="pump-meta">
+              <span class="status-pill" id="pillP1">IDLE / READY</span>
+            </div>
+            <button class="pump-toggle-btn" id="btnP1" onclick="togglePump(1)">TOGGLE P1</button>
           </div>
+
           <!-- Pump 2 -->
-          <div class="pump-row" id="pRow2">
-            <div class="pump-info">
-              <span class="pump-title">Pump 2</span>
-              <span id="p2StatePill" class="val-pill pill-off">OFF</span>
-              <span id="p2Time" class="pump-time">--</span>
-            </div>
-            <div class="pump-actions">
-              <label class="toggle-wrap" title="Enable automatic outflow in AUTO mode">
-                <input type="checkbox" id="chkAutoP2">
-                <span class="toggle-slider"></span>
-                <span class="chk-label">Auto</span>
+          <div class="pump-card glass-card" id="cardP2">
+            <div class="pump-card-header">
+              <div class="pump-title">
+                <span class="pump-indicator" id="indP2"></span>
+                <h4>PUMP 2</h4>
+              </div>
+              <label class="auto-mask-check" title="Allowed in Auto Mode">
+                <input type="checkbox" id="maskP2" onchange="updateAutoMask()">
+                <span>AUTO</span>
               </label>
-              <button id="btnP2Toggle" class="btn btn-sm btn-primary">Toggle</button>
             </div>
+            <div class="pump-meta">
+              <span class="status-pill" id="pillP2">IDLE / READY</span>
+            </div>
+            <button class="pump-toggle-btn" id="btnP2" onclick="togglePump(2)">TOGGLE P2</button>
           </div>
+
           <!-- Pump 3 -->
-          <div class="pump-row" id="pRow3">
-            <div class="pump-info">
-              <span class="pump-title">Pump 3</span>
-              <span id="p3StatePill" class="val-pill pill-off">OFF</span>
-              <span id="p3Time" class="pump-time">--</span>
-            </div>
-            <div class="pump-actions">
-              <label class="toggle-wrap" title="Enable automatic outflow in AUTO mode">
-                <input type="checkbox" id="chkAutoP3">
-                <span class="toggle-slider"></span>
-                <span class="chk-label">Auto</span>
+          <div class="pump-card glass-card" id="cardP3">
+            <div class="pump-card-header">
+              <div class="pump-title">
+                <span class="pump-indicator" id="indP3"></span>
+                <h4>PUMP 3</h4>
+              </div>
+              <label class="auto-mask-check" title="Allowed in Auto Mode">
+                <input type="checkbox" id="maskP3" onchange="updateAutoMask()">
+                <span>AUTO</span>
               </label>
-              <button id="btnP3Toggle" class="btn btn-sm btn-primary">Toggle</button>
             </div>
+            <div class="pump-meta">
+              <span class="status-pill" id="pillP3">IDLE / READY</span>
+            </div>
+            <button class="pump-toggle-btn" id="btnP3" onclick="togglePump(3)">TOGGLE P3</button>
           </div>
         </div>
-      </section>
 
-      <!-- RF & Diagnostics Card -->
-      <section class="card diag-card">
-        <div class="card-header">
-          <h2>RF &amp; Diagnostics</h2>
-          <span id="rfBadge" class="badge badge-green">868.1 MHz</span>
-        </div>
-        <div class="metrics-grid">
-          <div class="metric-box">
-            <span class="m-label">LoRa RSSI</span>
-            <span id="valRssi" class="m-val">-- dBm</span>
+        <!-- Remote Pond Inflow Pump Controller -->
+        <div class="pond-card glass-card" id="cardPond">
+          <div class="pond-info">
+            <div class="pump-title">
+              <span class="pump-indicator pond-ind" id="indPond"></span>
+              <h4>REMOTE POND REFILL PUMP</h4>
+            </div>
+            <p class="pond-desc" id="pondDesc">Refills tank via LoRa when water drops to 0.</p>
           </div>
-          <div class="metric-box">
-            <span class="m-label">LoRa SNR</span>
-            <span id="valSnr" class="m-val">-- dB</span>
-          </div>
-          <div class="metric-box">
-            <span class="m-label">Gateway Ping</span>
-            <span id="valGwAgo" class="m-val">--</span>
-          </div>
-          <div class="metric-box">
-            <span class="m-label">Free Heap</span>
-            <span id="valHeap" class="m-val">-- KB</span>
-          </div>
-          <div class="metric-box">
-            <span class="m-label">Boot Count</span>
-            <span id="valBoots" class="m-val">#--</span>
-          </div>
-          <div class="metric-box">
-            <span class="m-label">PCF8574 I²C</span>
-            <span id="valPcf" class="m-val text-green">OK</span>
+          <div class="pond-actions">
+            <div class="charge-latch-badge" id="latchBadge">LATCH: IDLE</div>
+            <button class="pond-toggle-btn" id="btnPond" onclick="togglePond()">TOGGLE POND</button>
           </div>
         </div>
-      </section>
 
-      <!-- System Tuning & Configuration Card -->
-      <section class="card config-card">
-        <div class="card-header">
-          <h2>System Configuration</h2>
-          <span class="badge badge-dark">NVS Persisted</span>
+        <!-- Live Canvas Signal & Level Sparkline -->
+        <div class="sparkline-card glass-card">
+          <div class="sparkline-header">
+            <h3>LIVE TELEMETRY TRENDS</h3>
+            <span class="sparkline-legend">
+              <span class="leg-dot level-dot"></span> Water Level
+              <span class="leg-dot rssi-dot"></span> RSSI
+            </span>
+          </div>
+          <canvas id="sparklineCanvas" width="560" height="110"></canvas>
         </div>
-        <form id="cfgForm" class="cfg-form" onsubmit="return false;">
-          <div class="form-group">
-            <label for="cfgRuntime">Min Pump Runtime (ms) <span class="tip">Anti-chatter run guard</span></label>
-            <div class="input-with-range">
-              <input type="range" id="rngRuntime" min="1000" max="60000" step="1000">
-              <input type="number" id="cfgRuntime" min="1000" max="300000">
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label for="cfgCooldown">Min Pump Cooldown (ms) <span class="tip">Contactor resting guard</span></label>
-            <div class="input-with-range">
-              <input type="range" id="rngCooldown" min="5000" max="120000" step="1000">
-              <input type="number" id="cfgCooldown" min="5000" max="600000">
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label for="cfgTelem">Telemetry Heartbeat (ms) <span class="tip">EU868 &lt;1% duty cycle</span></label>
-            <div class="input-with-range">
-              <input type="range" id="rngTelem" min="5000" max="60000" step="1000">
-              <input type="number" id="cfgTelem" min="2000" max="300000">
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label for="cfgBootAuto">Default Boot Mode</label>
-            <select id="cfgBootAuto" class="form-select">
-              <option value="0">MANUAL Mode</option>
-              <option value="1">AUTOMATIC Mode</option>
-            </select>
-          </div>
-
-          <div class="cfg-btn-row">
-            <button id="btnSaveCfg" type="button" class="btn btn-success">💾 Apply &amp; Save to Flash</button>
-            <button id="btnReloadCfg" type="button" class="btn btn-outline">🔄 Refresh</button>
-            <button id="btnDefaultsCfg" type="button" class="btn btn-danger-outline">⚠️ Defaults</button>
-            <button id="btnReboot" type="button" class="btn btn-danger">⚡ Reboot</button>
-          </div>
-        </form>
       </section>
     </main>
+
+    <!-- Bottom Diagnostics Bar -->
+    <footer class="hud-footer glass-card">
+      <div class="diag-item">
+        <span class="diag-k">PCF8574 I²C:</span>
+        <span class="diag-v" id="diagPcf">OK</span>
+      </div>
+      <div class="diag-item">
+        <span class="diag-k">LoRa RSSI:</span>
+        <span class="diag-v" id="diagRssi">-- dBm</span>
+      </div>
+      <div class="diag-item">
+        <span class="diag-k">LoRa SNR:</span>
+        <span class="diag-v" id="diagSnr">-- dB</span>
+      </div>
+      <div class="diag-item">
+        <span class="diag-k">Free Heap:</span>
+        <span class="diag-v" id="diagHeap">-- KB</span>
+      </div>
+      <div class="diag-item">
+        <span class="diag-k">Boot Count:</span>
+        <span class="diag-v" id="diagBoots">#0</span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Settings & Network Modal Drawer -->
+  <div class="modal-backdrop" id="settingsModal">
+    <div class="modal-card glass-card">
+      <div class="modal-header">
+        <h2>SYSTEM & NETWORK CONFIG</h2>
+        <button class="icon-btn" id="btnSettingsClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="config-section">
+          <h3>PUMP TIMINGS & TELEMETRY</h3>
+          <div class="form-row">
+            <label for="cfgRuntime">Min Runtime (ms):</label>
+            <input type="number" id="cfgRuntime" min="1000" max="300000" step="1000" value="20000">
+          </div>
+          <div class="form-row">
+            <label for="cfgCooldown">Min Cooldown (ms):</label>
+            <input type="number" id="cfgCooldown" min="5000" max="600000" step="1000" value="20000">
+          </div>
+          <div class="form-row">
+            <label for="cfgTelem">Telemetry Interval (ms):</label>
+            <input type="number" id="cfgTelem" min="2000" max="300000" step="1000" value="30000">
+          </div>
+          <div class="form-row checkbox-row">
+            <label for="cfgBootAuto">Default Boot Mode:</label>
+            <select id="cfgBootAuto">
+              <option value="0">Manual Mode</option>
+              <option value="1">Automatic Mode</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="config-section">
+          <h3>ALWAYS-AVAILABLE WEB & WI-FI</h3>
+          <div class="form-row checkbox-row">
+            <label for="cfgAlwaysOn">Auto-Start Web on Boot:</label>
+            <input type="checkbox" id="cfgAlwaysOn" checked>
+          </div>
+          <p class="section-help">When enabled, the Web Server and SoftAP automatically initialize on every startup without needing Serial commands.</p>
+          <div class="form-row">
+            <label for="cfgStaSsid">Home Wi-Fi (SSID):</label>
+            <input type="text" id="cfgStaSsid" placeholder="Optional Home Router SSID">
+          </div>
+          <div class="form-row">
+            <label for="cfgStaPass">Home Wi-Fi Password:</label>
+            <input type="password" id="cfgStaPass" placeholder="Optional Router Password">
+          </div>
+          <p class="section-help">Allows accessing this dashboard directly via <code>http://tanknode.local</code> on your home network.</p>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="saveConfiguration()">SAVE & PERSIST TO FLASH</button>
+          <button class="btn btn-secondary" onclick="restoreDefaults()">RESTORE DEFAULTS</button>
+          <button class="btn btn-danger" onclick="rebootDevice()">REBOOT ESP32</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Toast Notification Container -->
-  <div id="toast" class="toast">Action Saved</div>
+  <div class="toast-container" id="toastContainer"></div>
 
   <script src="app.js"></script>
 </body>

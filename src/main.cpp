@@ -14,6 +14,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <LittleFS.h>
 
 #include "config.h"
@@ -62,6 +63,9 @@ struct LocalConfig {
   bool pump_manual_state[3]; 
   bool last_demand_state;    // Stored filling state latch for the pond charger
   uint8_t debug_mode_enabled; // 1 = start WiFi hotspot on boot, 0 = keep off
+  uint8_t web_always_on;      // 1 = Web server always active on boot
+  char wifi_sta_ssid[33];     // optional home Wi-Fi SSID
+  char wifi_sta_pass[65];     // optional home Wi-Fi password
 };
 
 struct NodeStats {
@@ -124,8 +128,13 @@ static PumpHysteresis phP1, phP2, phP3;
 
 // ─── Config / Stats persistence ───────────────────────────────────────────────
 static void resetConfigToDefaults() {
-  gConfig = {DEFAULT_PUMP_MIN_RUNTIME_MS, DEFAULT_PUMP_MIN_COOLDOWN_MS,
-             DEFAULT_TELEMETRY_INTERVAL_MS, 0, {false, false, false}, false, {false, false, false}, false, 0};
+  memset(&gConfig, 0, sizeof(gConfig));
+  gConfig.pump_min_runtime_ms = DEFAULT_PUMP_MIN_RUNTIME_MS;
+  gConfig.pump_min_cooldown_ms = DEFAULT_PUMP_MIN_COOLDOWN_MS;
+  gConfig.telemetry_interval_ms = DEFAULT_TELEMETRY_INTERVAL_MS;
+  gConfig.boot_auto_mode = 0;
+  gConfig.debug_mode_enabled = DEFAULT_WEB_ALWAYS_ON;
+  gConfig.web_always_on = DEFAULT_WEB_ALWAYS_ON;
 }
 
 static bool validateConfig(const LocalConfig &c) {
@@ -136,7 +145,8 @@ static bool validateConfig(const LocalConfig &c) {
          c.telemetry_interval_ms >= CFG_TELEM_MIN_MS &&
          c.telemetry_interval_ms <= CFG_TELEM_MAX_MS &&
          c.boot_auto_mode <= 1 &&
-         c.debug_mode_enabled <= 1;
+         c.debug_mode_enabled <= 1 &&
+         c.web_always_on <= 1;
 }
 
 static void saveConfig(bool force = false) {
@@ -337,25 +347,33 @@ static void broadcastTelemetryWs() {
   snprintf(buf, sizeof(buf),
     "{\"type\":\"telemetry\",\"wl\":%u,\"mode\":\"%s\",\"pumps\":[%d,%d,%d],"
     "\"auto_mask\":[%d,%d,%d],\"pond\":%d,\"demand\":%d,\"err\":%u,\"err_str\":\"%s\","
-    "\"rssi\":%d,\"snr\":%d,\"heap\":%lu,\"uptime\":%lu,\"boots\":%lu,\"pcf_ok\":%d}",
+    "\"rssi\":%d,\"snr\":%d,\"heap\":%lu,\"uptime\":%lu,\"boots\":%lu,\"pcf_ok\":%d,"
+    "\"sta\":%d,\"sta_ip\":\"%s\"}",
     wl, am ? "AUTO" : "MAN", ps[0], ps[1], ps[2],
     pea[0], pea[1], pea[2], pond, demand, ec, errStr,
     rssi, snr, (unsigned long)ESP.getFreeHeap(), (unsigned long)(millis() / 1000),
-    (unsigned long)gStats.boot_count, pcfOk ? 1 : 0
+    (unsigned long)gStats.boot_count, pcfOk ? 1 : 0,
+    WiFi.status() == WL_CONNECTED ? 1 : 0,
+    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : ""
   );
   wsServer.broadcastTXT(buf);
 }
 
 static void sendConfigWs(uint8_t num) {
-  char buf[256];
+  char buf[384];
   snprintf(buf, sizeof(buf),
     "{\"type\":\"config\",\"runtime\":%lu,\"cooldown\":%lu,\"telem\":%lu,"
-    "\"boot_auto\":%u,\"debug\":%u}",
+    "\"boot_auto\":%u,\"debug\":%u,\"always_on\":%u,\"sta_ssid\":\"%s\","
+    "\"ap_ip\":\"%s\",\"sta_ip\":\"%s\"}",
     (unsigned long)gConfig.pump_min_runtime_ms,
     (unsigned long)gConfig.pump_min_cooldown_ms,
     (unsigned long)gConfig.telemetry_interval_ms,
     gConfig.boot_auto_mode,
-    gConfig.debug_mode_enabled
+    gConfig.debug_mode_enabled,
+    gConfig.web_always_on,
+    gConfig.wifi_sta_ssid,
+    WiFi.softAPIP().toString().c_str(),
+    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "Disconnected"
   );
   wsServer.sendTXT(num, buf);
 }
@@ -419,6 +437,7 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
       int cIdx = msg.indexOf("\"cooldown\":");
       int tIdx = msg.indexOf("\"telem\":");
       int bIdx = msg.indexOf("\"boot_auto\":");
+      int aIdx = msg.indexOf("\"always_on\":");
       if (rIdx >= 0) {
         uint32_t v = msg.substring(rIdx + 10).toInt();
         if (v >= CFG_RUNTIME_MIN_MS && v <= CFG_RUNTIME_MAX_MS) gConfig.pump_min_runtime_ms = v;
@@ -435,9 +454,48 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
         uint8_t v = msg.substring(bIdx + 12).toInt();
         if (v <= 1) gConfig.boot_auto_mode = v;
       }
+      if (aIdx >= 0) {
+        uint8_t a = msg.substring(aIdx + 12).toInt();
+        if (a <= 1) {
+          gConfig.web_always_on = a;
+          gConfig.debug_mode_enabled = a;
+        }
+      }
       saveConfig(true);
       wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Config Saved to Flash!\",\"is_err\":false}");
       sendConfigWs(num);
+    } else if (msg.indexOf("\"cmd\":\"set_wifi\"") >= 0) {
+      int sIdx = msg.indexOf("\"ssid\":\"");
+      int pIdx = msg.indexOf("\"pass\":\"");
+      int aIdx = msg.indexOf("\"always_on\":");
+      if (sIdx >= 0) {
+        int sEnd = msg.indexOf("\"", sIdx + 8);
+        if (sEnd > sIdx + 8) {
+          String s = msg.substring(sIdx + 8, sEnd);
+          memset(gConfig.wifi_sta_ssid, 0, sizeof(gConfig.wifi_sta_ssid));
+          strncpy(gConfig.wifi_sta_ssid, s.c_str(), sizeof(gConfig.wifi_sta_ssid) - 1);
+        } else if (sEnd == sIdx + 8) {
+          memset(gConfig.wifi_sta_ssid, 0, sizeof(gConfig.wifi_sta_ssid));
+        }
+      }
+      if (pIdx >= 0) {
+        int pEnd = msg.indexOf("\"", pIdx + 8);
+        if (pEnd >= pIdx + 8) {
+          String p = msg.substring(pIdx + 8, pEnd);
+          memset(gConfig.wifi_sta_pass, 0, sizeof(gConfig.wifi_sta_pass));
+          strncpy(gConfig.wifi_sta_pass, p.c_str(), sizeof(gConfig.wifi_sta_pass) - 1);
+        }
+      }
+      if (aIdx >= 0) {
+        uint8_t a = msg.substring(aIdx + 12).toInt();
+        if (a <= 1) {
+          gConfig.web_always_on = a;
+          gConfig.debug_mode_enabled = a;
+        }
+      }
+      saveConfig(true);
+      sendConfigWs(num);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Wi-Fi & Startup Config Saved! Reboot to apply STA changes.\",\"is_err\":false}");
     } else if (msg.indexOf("\"cmd\":\"defaults\"") >= 0) {
       resetConfigToDefaults();
       saveConfig(true);
@@ -457,9 +515,21 @@ static void startDebugWeb() {
   if (gDebugServerRunning) return;
   LittleFS.begin(true);
 
-  WiFi.mode(WIFI_AP);
+  if (strlen(gConfig.wifi_sta_ssid) > 0) {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.begin(gConfig.wifi_sta_ssid, gConfig.wifi_sta_pass);
+    Serial.printf("\n[DebugWeb] Connecting to Home Wi-Fi SSID '%s'...\n", gConfig.wifi_sta_ssid);
+  } else {
+    WiFi.mode(WIFI_AP);
+  }
+
   WiFi.softAP(DEBUG_WIFI_SSID, DEBUG_WIFI_PASS);
   dnsServer.start(53, "*", WiFi.softAPIP());
+
+  if (MDNS.begin(MDNS_HOSTNAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("[DebugWeb] mDNS active: http://%s.local\n", MDNS_HOSTNAME);
+  }
 
   httpServer.on("/", HTTP_GET, []() {
     if (LittleFS.exists("/index.html")) {
@@ -520,15 +590,17 @@ static void startDebugWeb() {
   gDebugServerRunning = true;
   Serial.printf("\n[DebugWeb] Hotspot online! SSID='%s' Pass='%s' IP=%s\n",
                 DEBUG_WIFI_SSID, DEBUG_WIFI_PASS, WiFi.softAPIP().toString().c_str());
-  Serial.println("[DebugWeb] Connect to http://192.168.4.1 in your browser.");
+  Serial.println("[DebugWeb] Access via http://192.168.4.1 or http://tanknode.local");
 }
 
 static void stopDebugWeb() {
   if (!gDebugServerRunning) return;
+  MDNS.end();
   wsServer.close();
   httpServer.stop();
   dnsServer.stop();
   WiFi.softAPdisconnect(true);
+  WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   gDebugServerRunning = false;
   Serial.println("\n[DebugWeb] Hotspot stopped & WiFi powered OFF.");
@@ -1122,6 +1194,9 @@ static void Task_SerialConsole(void *) {
           Serial.println("  auto | manual           - Switch operation mode");
           Serial.println("  p1 | p2 | p3 | pond     - Pulse manual toggle buttons");
           Serial.println("  debug [on|off]          - Enable or disable WiFi AP & WebSocket dashboard");
+          Serial.println("  web always [on|off]     - Set Web dashboard to always auto-start on boot");
+          Serial.println("  set wifi <ssid> <pass>  - Configure Home Wi-Fi credentials (STA)");
+          Serial.println("  set wifi clear          - Clear Home Wi-Fi credentials");
           Serial.println("  set runtime <ms>        - Set pump min runtime (1000 - 300000 ms)");
           Serial.println("  set cooldown <ms>       - Set pump min cooldown (5000 - 600000 ms)");
           Serial.println("  set telem <ms>          - Set telemetry broadcast interval (2000 - 300000 ms)");
@@ -1146,11 +1221,11 @@ static void Task_SerialConsole(void *) {
             xSemaphoreGive(xStateMutex);
           }
         } else if (cmd == "config") {
-          Serial.printf("runtime=%lums cooldown=%lums telem=%lums auto=%u mask=%d;%d;%d pond=%d debug=%u\n",
+          Serial.printf("runtime=%lums cooldown=%lums telem=%lums auto=%u mask=%d;%d;%d pond=%d debug=%u always_on=%u sta='%s'\n",
                         gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms,
                         gConfig.telemetry_interval_ms, gConfig.boot_auto_mode,
                         gConfig.pump_enabled_auto[0], gConfig.pump_enabled_auto[1], gConfig.pump_enabled_auto[2],
-                        gConfig.pond_enabled, gConfig.debug_mode_enabled);
+                        gConfig.pond_enabled, gConfig.debug_mode_enabled, gConfig.web_always_on, gConfig.wifi_sta_ssid);
         } else if (cmd == "stats") {
           Serial.printf("P1=%lus P2=%lus P3=%lus boots=%lu\n", gStats.runtime_p1_s,
                         gStats.runtime_p2_s, gStats.runtime_p3_s, gStats.boot_count);
@@ -1213,6 +1288,41 @@ static void Task_SerialConsole(void *) {
 #else
           Serial.println("Debug web interface disabled in build.");
 #endif
+        } else if (cmd == "web always on" || cmd == "web always 1" || cmd == "set web always 1") {
+#if ENABLE_DEBUG_WEB
+          gConfig.web_always_on = 1;
+          gConfig.debug_mode_enabled = 1;
+          gDebugServerWanted = true;
+          saveConfig(true);
+          Serial.println("Web dashboard: ALWAYS ON (Autostarts on boot).");
+#else
+          Serial.println("Debug web interface disabled in build.");
+#endif
+        } else if (cmd == "web always off" || cmd == "web always 0" || cmd == "set web always 0") {
+#if ENABLE_DEBUG_WEB
+          gConfig.web_always_on = 0;
+          saveConfig(true);
+          Serial.println("Web dashboard: ON-DEMAND only (Manual start via 'debug on').");
+#else
+          Serial.println("Debug web interface disabled in build.");
+#endif
+        } else if (cmd == "set wifi clear") {
+          memset(gConfig.wifi_sta_ssid, 0, sizeof(gConfig.wifi_sta_ssid));
+          memset(gConfig.wifi_sta_pass, 0, sizeof(gConfig.wifi_sta_pass));
+          saveConfig(true);
+          Serial.println("Home Wi-Fi credentials cleared. SoftAP mode only.");
+        } else if (cmd.startsWith("set wifi ")) {
+          char ssid[33] = {};
+          char pass[65] = {};
+          if (sscanf(cmd.c_str() + 9, "%32s %64s", ssid, pass) >= 1) {
+            strncpy(gConfig.wifi_sta_ssid, ssid, sizeof(gConfig.wifi_sta_ssid) - 1);
+            strncpy(gConfig.wifi_sta_pass, pass, sizeof(gConfig.wifi_sta_pass) - 1);
+            saveConfig(true);
+            Serial.printf("Saved Home Wi-Fi credentials: SSID='%s'\n", ssid);
+            Serial.println("Reboot or restart debug web server to connect.");
+          } else {
+            Serial.println("Usage: set wifi <ssid> <pass> (or: set wifi clear)");
+          }
         } else if (cmd.startsWith("set runtime ")) {
           uint32_t val = cmd.substring(12).toInt();
           if (val >= CFG_RUNTIME_MIN_MS && val <= CFG_RUNTIME_MAX_MS) {
@@ -1393,10 +1503,10 @@ void setup() {
   xTaskCreatePinnedToCore(Task_LoRaManager, "LoRaMgr", STACK_LORA_MGR, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(Task_SerialConsole, "SerialCon", STACK_SERIAL_CON, NULL, 1, NULL, 0);
 #if ENABLE_DEBUG_WEB
-  gDebugServerWanted = (bool)gConfig.debug_mode_enabled;
+  gDebugServerWanted = (gConfig.debug_mode_enabled || gConfig.web_always_on);
   xTaskCreatePinnedToCore(Task_DebugWebServer, "DebugWeb", STACK_DEBUG_WEB, NULL, 1, NULL, 0);
   if (gDebugServerWanted) {
-    Serial.println("[Boot] Debug WebServer enabled by config.");
+    Serial.println("[Boot] WebServer auto-started by config (Always Available).");
   }
 #endif
   xTaskCreatePinnedToCore(Task_InputSensorPoll, "InputPoll", STACK_INPUT_POLL, NULL, 3, NULL, 1);

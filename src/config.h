@@ -32,7 +32,7 @@
 #define NODE_POND         0x03
 #define NODE_BROADCAST    0xFF
 #define MY_NODE_ID        NODE_TANK
-#define CONFIG_VERSION    36    // Added debug_mode_enabled field
+#define CONFIG_VERSION    37    // Added web_always_on and WiFi STA credentials
 
 // StatusPayload flags byte (TX)
 #define STATUS_BIT_AUTO   0x01  // auto mode active
@@ -149,6 +149,8 @@
 #define DEBUG_HTTP_PORT                80
 #define DEBUG_WS_PORT                  81
 #define WS_BROADCAST_INTERVAL_MS       500UL
+#define MDNS_HOSTNAME                  "tanknode"
+#define DEFAULT_WEB_ALWAYS_ON          1    // 1 = Web server always active on boot, 0 = on-demand
 
 // ─── RTOS queue depths ────────────────────────────────────────────────────────
 #define RXQUEUE_DEPTH          8

@@ -30,6 +30,16 @@ gateway_ip  = None
 pkt_counter = 0
 last_hb     = {}
 
+# Tank Node & Pond Simulator State
+last_tank_status = {}
+pond_sim = {
+    "enabled": True,
+    "pump_running": False,
+    "pump_started_at": None,
+    "total_runtime_s": 0,
+    "sim_flow_lpm": 60.0  # 60 Liters per minute nominal pump flow
+}
+
 # ── Thread-Safe Terminal Printing ──────────────────────────────────────────────
 
 def safe_print(msg: str):
@@ -72,17 +82,29 @@ def decode_device_payload(payload_bytes: bytes):
         p1 = bool(flags & 0x02)
         p2 = bool(flags & 0x04)
         p3 = bool(flags & 0x08)
+        pond_flag = bool(flags & 0x10)
+
+        # Cache live status for the console
+        last_tank_status.update({
+            "water_level": water,
+            "auto_mode": auto_mode,
+            "p1": p1, "p2": p2, "p3": p3,
+            "pond_demand": pond_flag,
+            "temp_c": temp_raw / 10.0,
+            "humidity": humidity,
+            "last_seen": time.time()
+        })
 
         result.extend([
             f"  │   Type       = MSG_STATUS (11 bytes)",
-            f"  │   Flags      = 0x{flags:02X} → Auto={auto_mode} P1={p1} P2={p2} P3={p3} POND_PUMP={bool(flags & 0x10)}",
+            f"  │   Flags      = 0x{flags:02X} → Auto={auto_mode} P1={p1} P2={p2} P3={p3} POND_PUMP={pond_flag}",
             f"  │   Water      = {water} (level 0-3)",
             f"  │   Temperature= {temp_raw/10.0:.1f} °C",
             f"  │   Humidity   = {humidity} % RH",
             f"  │   Reserved   = 0x{reserved:02X}"
         ])
 
-    elif len(payload_bytes) == 8:  # MSG_CMD (RX to device)
+    elif len(payload_bytes) == 8:  # MSG_CMD (RX or node-to-node command)
         target = payload_bytes[5]
         action = payload_bytes[6]
         value  = payload_bytes[7]
@@ -104,6 +126,23 @@ def decode_device_payload(payload_bytes: bytes):
             f"  │   Action     = {action_str}",
             f"  │   Value      = {value_str}"
         ])
+
+        # Autonomous Pond Node Simulator (NODE_POND = 0x03)
+        if target_id == 0x03 and pond_sim["enabled"] and (target & 0x10):
+            turn_on = bool(value == 1) if action == 0x01 else not pond_sim["pump_running"]
+            now = time.time()
+            if turn_on != pond_sim["pump_running"]:
+                pond_sim["pump_running"] = turn_on
+                if turn_on:
+                    pond_sim["pump_started_at"] = now
+                    result.append(f"  │   🌊 [POND SIMULATOR] Tank demanded refill -> POND PUMP ENERGIZED (Rate: 60 L/min)")
+                else:
+                    if pond_sim["pump_started_at"]:
+                        dur = now - pond_sim["pump_started_at"]
+                        pond_sim["total_runtime_s"] += dur
+                        delivered = (dur / 60.0) * pond_sim["sim_flow_lpm"]
+                        result.append(f"  │   🛑 [POND SIMULATOR] Tank stopped refill -> Pump stopped. Delivered ~{delivered:.1f} L in {dur:.1f}s")
+                    pond_sim["pump_started_at"] = None
     else:
         result.append(f"  │   Unknown Payload Length ({len(payload_bytes)} bytes)")
 
@@ -256,6 +295,18 @@ def send(data: bytes):
     sock.sendto(data, (gateway_ip, SEND_PORT_DOWN))
     return True
 
+def send_tank_cmd(target_byte: int, action_byte: int, val_byte: int):
+    """
+    Sends an 8-byte MSG_CMD frame over LoRa to the Tank Node (NODE_TANK = 0x02)
+    via the SX1302 gateway.
+    """
+    pkt = bytearray([0x6B, 0x5A, 0x02, 0x01, 0x02, target_byte, action_byte, val_byte])
+    tx_json = build_custom(bytes(pkt), freq=868_100_000, power=14, sf=9, bw=125, cr="4/5", invert=False)
+    if send(tx_json):
+        t_name = {0x01: "MODE", 0x02: "P1", 0x04: "P2", 0x08: "P3", 0x10: "POND"}.get(target_byte, hex(target_byte))
+        a_name = "TOGGLE" if action_byte == 0 else ("SET ON" if val_byte == 1 else "SET OFF")
+        print(f"  [TX -> TANK NODE] 8-byte LoRa command: {t_name} -> {a_name}")
+
 # ── Listener thread ───────────────────────────────────────────────────────────
 
 def listener_thread():
@@ -297,7 +348,7 @@ def listener_thread():
 
 def print_help():
     print("""
-  Commands:
+  Gateway Commands:
     <text>                    Send text with gateway defaults (SF7 / 868.1 MHz)
     /tx <text>                Same (explicit)
     /sf <5-12> <text>         Send on a specific spreading factor
@@ -307,17 +358,108 @@ def print_help():
                                 freq=868.1  sf=7  bw=125  power=14
                                 cr=4/5  invert=1  modu=LORA  rfch=0
                                 hex=0302330c01100100 (For raw binary hex payloads)
-                              Example:  /custom sf=12 power=27 invert=1 hex=01020304
     /hex <hexstring>          Send raw bytes wrapped in JSON e.g. /hex deadbeef01
     /status                   Show last heartbeat stats
     /help                     Show this help
     Ctrl+C                    Exit
+
+  Tank Node & Pond Station Commands:
+    /tank status              Show latest cached telemetry from Tank Node
+    /tank mode auto|man       Command Tank Node operational mode
+    /tank p1 on|off|toggle    Command Outflow Pump 1
+    /tank p2 on|off|toggle    Command Outflow Pump 2
+    /tank p3 on|off|toggle    Command Outflow Pump 3
+    /tank pond on|off|toggle  Command Remote Pond Pump
+    /pond sim on|off          Enable/disable autonomous Pond Node Simulator
+    /pond status              Show simulated Pond Node pump state and volume
 """)
 
 
 def handle(line: str):
     line = line.strip()
     if not line:
+        return
+
+    if line == "/help":
+        print_help()
+        return
+
+    if line == "/tank status":
+        if not last_tank_status:
+            print("  [!] No telemetry received from Tank Node yet.")
+            return
+        ago = int(time.time() - last_tank_status.get("last_seen", time.time()))
+        wl = last_tank_status.get("water_level", 0)
+        mode = "AUTO" if last_tank_status.get("auto_mode") else "MANUAL"
+        p1 = "ON" if last_tank_status.get("p1") else "OFF"
+        p2 = "ON" if last_tank_status.get("p2") else "OFF"
+        p3 = "ON" if last_tank_status.get("p3") else "OFF"
+        pond = "DEMAND ACTIVE" if last_tank_status.get("pond_demand") else "IDLE"
+        temp = last_tank_status.get("temp_c", 0.0)
+        hum = last_tank_status.get("humidity", 0)
+        wl_str = ["EMPTY (0%)", "LOW (33%)", "MID (66%)", "FULL (100%)"][min(wl, 3)]
+        print(f"  ┌─ Tank Node Live Telemetry (seen {ago}s ago) ─────────")
+        print(f"  │ Water Level : {wl}/3 ({wl_str})")
+        print(f"  │ System Mode : {mode}")
+        print(f"  │ Outflow P1  : {p1}")
+        print(f"  │ Outflow P2  : {p2}")
+        print(f"  │ Outflow P3  : {p3}")
+        print(f"  │ Pond Demand : {pond}")
+        print(f"  │ Environment : {temp:.1f} °C, {hum}% RH")
+        print(f"  └─────────────────────────────────────────────────────")
+        return
+
+    if line.startswith("/tank "):
+        parts = line[6:].strip().split()
+        if len(parts) >= 2:
+            sub = parts[0].lower()
+            val = parts[1].lower()
+            if sub == "mode":
+                act = 0x00 if val == "toggle" else 0x01
+                v = 0x01 if val in ("auto", "1", "on") else 0x00
+                send_tank_cmd(0x01, act, v)
+                return
+            elif sub in ("p1", "p2", "p3"):
+                p_mask = {"p1": 0x02, "p2": 0x04, "p3": 0x08}[sub]
+                act = 0x00 if val == "toggle" else 0x01
+                v = 0x01 if val in ("on", "1") else 0x00
+                send_tank_cmd(p_mask, act, v)
+                return
+            elif sub == "pond":
+                act = 0x00 if val == "toggle" else 0x01
+                v = 0x01 if val in ("on", "1") else 0x00
+                send_tank_cmd(0x10, act, v)
+                return
+        print("  Usage: /tank <mode|p1|p2|p3|pond> <on|off|toggle|auto|man>")
+        return
+
+    if line == "/pond status":
+        running = pond_sim["pump_running"]
+        st = "RUNNING (PUMPING)" if running else "IDLE (STOPPED)"
+        now = time.time()
+        cur_dur = (now - pond_sim["pump_started_at"]) if (running and pond_sim["pump_started_at"]) else 0
+        tot_dur = pond_sim["total_runtime_s"] + cur_dur
+        tot_liters = (tot_dur / 60.0) * pond_sim["sim_flow_lpm"]
+        print(f"  ┌─ Pond Node (0x03) Simulator Status ─────────────────")
+        print(f"  │ Simulator Active : {'YES' if pond_sim['enabled'] else 'DISABLED'}")
+        print(f"  │ Pump Relay State : {st}")
+        print(f"  │ Current Run Time : {cur_dur:.1f}s")
+        print(f"  │ Total Operating  : {tot_dur:.1f}s")
+        print(f"  │ Total Delivered  : ~{tot_liters:.1f} Liters ({pond_sim['sim_flow_lpm']} L/min)")
+        print(f"  └─────────────────────────────────────────────────────")
+        return
+
+    if line.startswith("/pond sim "):
+        arg = line[10:].strip().lower()
+        if arg in ("on", "1", "enable"):
+            pond_sim["enabled"] = True
+            print("  [Pond Sim] Autonomous Pond Node simulator ENABLED.")
+        elif arg in ("off", "0", "disable"):
+            pond_sim["enabled"] = False
+            pond_sim["pump_running"] = False
+            print("  [Pond Sim] Autonomous Pond Node simulator DISABLED.")
+        else:
+            print("  Usage: /pond sim <on|off>")
         return
 
     if line == "/help":
@@ -457,27 +599,31 @@ def handle(line: str):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-sock.bind(("0.0.0.0", LISTEN_PORT_UP))
+def main():
+    sock.bind(("0.0.0.0", LISTEN_PORT_UP))
 
-t = threading.Thread(target=listener_thread, daemon=True)
-t.start()
+    t = threading.Thread(target=listener_thread, daemon=True)
+    t.start()
 
-print(f"SX1302 Debug Console")
-print(f"  listening on :{LISTEN_PORT_UP}  →  sending to :{SEND_PORT_DOWN}")
-print(f"  type /help for commands\n")
-print("Waiting for gateway boot packet...\n")
+    print(f"SX1302 Debug Console")
+    print(f"  listening on :{LISTEN_PORT_UP}  →  sending to :{SEND_PORT_DOWN}")
+    print(f"  type /help for commands\n")
+    print("Waiting for gateway boot packet...\n")
 
-# Start an interactive prompt session
-session = PromptSession()
+    # Start an interactive prompt session
+    session = PromptSession()
 
-# The patch_stdout context manager hooks into sys.stdout automatically
-with patch_stdout():
-    while True:
-        try:
-            user_line = session.prompt("> ")
-            handle(user_line)
-        except KeyboardInterrupt:
-            print("\nExiting.")
-            break
-        except EOFError:
-            break
+    # The patch_stdout context manager hooks into sys.stdout automatically
+    with patch_stdout():
+        while True:
+            try:
+                user_line = session.prompt("> ")
+                handle(user_line)
+            except KeyboardInterrupt:
+                print("\nExiting.")
+                break
+            except EOFError:
+                break
+
+if __name__ == "__main__":
+    main()

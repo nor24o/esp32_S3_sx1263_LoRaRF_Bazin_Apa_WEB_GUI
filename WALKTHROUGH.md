@@ -57,21 +57,77 @@ We upgraded the firmware for the **ESP32-S3 + SX1262 Tank Node** ("Bazin Apă") 
    - Connected to ESP32-S3 over COM3 at 921,600 baud.
    - Verified boot sequence:
      ```text
-     [Boot] #25 autoMode=0
+- **Always-On Web Server & Home Wi-Fi STA with mDNS**:
+  - Web server auto-starts on boot by default (`DEFAULT_WEB_ALWAYS_ON 1`, persistent across reboots via `web always on/off`).
+  - Optional Home Wi-Fi connection (`set wifi <ssid> <pass>`) with mDNS responder allowing connection via `http://tanknode.local`.
+  - Fallback to standalone SoftAP (`TankNode-Debug`, `192.168.4.1`) if STA is unconfigured.
+- **Ultra-Fancy Cyberpunk / SCADA Glassmorphic Web Dashboard**:
+  - `data/index.html`: Complete glassmorphic HUD layout with animated header pulse, audio mute toggle, SVG reservoir tank, top inflow jet & splash ripples, 3 outflow pipes with rotating turbine impellers, float sensor buoys, pump cards with auto-mask selectors, pond card, 40-point sparkline canvas, and slide-out settings drawer.
+  - `data/style.css`: Modern glassmorphic styles with CSS `@keyframes waveBack`, `@keyframes waveFront`, `@keyframes bubbleRise`, `@keyframes flowSlide`, `@keyframes splashRipple`, `@keyframes spinTurbine`, and `@keyframes streamRight`.
+  - `data/app.js`: Web Audio API sound synthesizer (tactile clicks, relay chimes, alert tones), live 40-point sparkline canvas graph, WebSocket streaming, and dynamic setting dispatcher.
+- **Gateway Station & Autonomous Pond Simulator (`run.py`)**:
+  - Telemetry parser decoding incoming `MSG_STATUS` frames from Tank Node (`0x02`).
+  - Pond Node (`0x03`) Simulator intercepting refill demand packets (`MSG_CMD`), simulating pumping at 60 L/min, tracking run time and volume delivered.
+  - Interactive commands: `/tank status`, `/tank mode`, `/tank p1..p3`, `/tank pond`, `/pond sim on/off`, `/pond status`.
+
+---
+
+## 2. Verification & Validation
+
+1. **Compilation & Filesystem Packaging**:
+   - Packaged LittleFS filesystem image (`pio run --target buildfs`):
+     ```text
+     Building FS image from 'data' directory to littlefs.bin:
+     /app.js (10,957 bytes), /index.html (9,634 bytes), /style.css (12,987 bytes)
+     Compressed to 15,761 bytes in LittleFS partition
+     [SUCCESS] in 3.42s
+     ```
+   - Compiled firmware with PlatformIO (`pio run`):
+     - **RAM**: `54,348 bytes (16.6%)`
+     - **Flash**: `959,201 bytes (28.7%)`
+     - **Result**: `[SUCCESS] with 0 errors`
+
+2. **Filesystem & Firmware Flashing**:
+   - Flashed LittleFS partition (`pio run --target uploadfs --upload-port COM3`) - verified.
+   - Flashed firmware binary (`pio run --target upload --upload-port COM3`) - verified.
+
+3. **Live Hardware Execution & Serial CLI Verification**:
+   - Connected to ESP32-S3 over COM3 at 921,600 baud.
+   - Verified boot sequence:
+     ```text
+     [Boot] #28 autoMode=0
+     [WebServer] Starting in Always-On mode...
+     [DebugWeb] Hotspot online! SSID='TankNode-Debug' Pass='12345678' IP=192.168.4.1
+     [mDNS] Responder started: http://tanknode.local
+     [WebServer] auto-started by config (Always Available)
      [PCF8574] found
      [LoRa] OK - listening
-     [Status] Up:2s WL:0 Mode:MAN Charge Latch:0 Pond:0 | P1:OFF P2:OFF P3:OFF
      ```
-   - Tested interactive commands via Serial:
-     - `debug on` $\rightarrow$ SoftAP launched: `[DebugWeb] Hotspot online! SSID='TankNode-Debug' Pass='12345678' IP=192.168.4.1`
-     - `set runtime 25000` $\rightarrow$ runtime updated to 25000 ms.
-     - `set cooldown 15000` $\rightarrow$ cooldown updated to 15000 ms.
-     - `set telem 12000` $\rightarrow$ telemetry broadcast updated to 12000 ms.
-     - `set mask 1 1 0` $\rightarrow$ auto pump mask updated to P1=1, P2=1, P3=0.
-     - `set pond 1` $\rightarrow$ pond enabled, remote packet dispatched via LoRa.
-     - `set mode auto` $\rightarrow$ switched to AUTO, turned ON pumps P1 & P2 based on water level.
-     - `set defaults` $\rightarrow$ restored default configuration in NVS.
-     - `debug off` $\rightarrow$ Hotspot stopped and WiFi powered OFF (`debug=0`).
+   - Verified CLI commands:
+     - `config` $\rightarrow$ shows `AlwaysOn:1`, `WiFi-STA:''`.
+     - `web always off` $\rightarrow$ `WebServer Always-On DISABLED`.
+     - `web always on` $\rightarrow$ `WebServer Always-On ENABLED (will auto-start on boot)`.
+     - `set wifi MySSID MySecret` $\rightarrow$ `WiFi STA credentials saved. SSID: MySSID`.
+     - `set wifi clear` $\rightarrow$ `WiFi STA credentials cleared`.
+
+4. **Gateway Station & Pond Simulator Automated Tests**:
+   - Executed test suite (`scratch/test_gateway_station.py`) through Python:
+     ```text
+     ─── TEST 1: Decode incoming MSG_STATUS (Tank Node -> Gateway) ───
+       [Device Frame] MsgType: 0x01 | Sender: 0x02 → Target: 0x01
+       Flags = 0x03 → Auto=True P1=True | Water = 2 | 24.5 °C, 55% RH
+     ─── TEST 2: Verify /tank status command ───
+       Water Level: 2/3 (MID (66%)) | Mode: AUTO | P1: ON, P2: OFF, P3: OFF
+     ─── TEST 3: Pond Node Simulator (Tank Node -> Pond Node) ───
+       🌊 [POND SIMULATOR] Tank demanded refill -> POND PUMP ENERGIZED (Rate: 60 L/min)
+     ─── TEST 4: Verify /pond status while pumping ───
+       Relay: RUNNING (PUMPING) | Rate: 60.0 L/min
+     ─── TEST 5: Tank Node commands Pond Node to turn OFF ───
+       🛑 [POND SIMULATOR] Tank stopped refill -> Pump stopped. Delivered ~1.0 L in 1.0s
+     ─── TEST 6: Verify /pond status after pumping stops ───
+       Relay: IDLE (STOPPED) | Total Delivered: ~1.0 Liters
+     SUCCESS: All gateway station & pond simulator tests PASSED!
+     ```
 
 ---
 
@@ -79,4 +135,5 @@ We upgraded the firmware for the **ESP32-S3 + SX1262 Tank Node** ("Bazin Apă") 
 - `0e35d43`: Baseline snapshot of initial multi-tasking firmware.
 - `23db5c2`: Firmware hardening, anti-chatter, slosh filter, NVS preservation.
 - `27c76f6`: Comprehensive `README.md` and `WALKTHROUGH.md` documentation.
-- *(Current)*: On-demand Debug Mode, Web & WebSocket dashboard in `data/`, PROGMEM fallback, and expanded Serial CLI.
+- `daea6f3`: On-demand Debug Web & WebSocket dashboard in `data/` and expanded Serial CLI.
+- *(Current)*: Always-available Cyberpunk SCADA glassmorphic dashboard with dual Wi-Fi/mDNS, and Gateway Station + Autonomous Pond Simulator in `run.py`.

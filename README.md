@@ -214,8 +214,12 @@ Connect over USB CDC at **921,600 baud**. Available commands:
 | `manual` | Switches system to **MANUAL** mode |
 | `p1` / `p2` / `p3` | Injects a button press to toggle the corresponding outflow pump relay |
 | `pond` | Injects a button press to toggle the remote pond inflow refill pump demand |
-| `debug on` | Activates WiFi SoftAP (`TankNode-Debug`) and starts the Web & WebSocket dashboard |
+| `debug on` | Activates WiFi and starts the Web & WebSocket dashboard (manual session) |
 | `debug off` | Shuts down the Web & WebSocket server and powers WiFi radio completely OFF |
+| `web always on` | Enables persistent auto-start of Web server on boot across reboots |
+| `web always off` | Disables persistent auto-start (reverts to on-demand debug mode) |
+| `set wifi <ssid> <pass>` | Configures Home Wi-Fi credentials for STA mode with mDNS (`tanknode.local`) |
+| `set wifi clear` | Clears stored Home Wi-Fi credentials (reverts to standalone SoftAP) |
 | `set runtime <ms>` | Sets minimum pump runtime in ms (`1000` to `300000` ms) and saves to NVS |
 | `set cooldown <ms>` | Sets minimum pump cooldown in ms (`5000` to `600000` ms) and saves to NVS |
 | `set telem <ms>` | Sets telemetry broadcast interval in ms (`2000` to `300000` ms) and saves to NVS |
@@ -229,28 +233,34 @@ Connect over USB CDC at **921,600 baud**. Available commands:
 
 ---
 
-## 7. On-Demand Debug Web Dashboard
+## 7. Web Dashboard & Dual Wi-Fi Modes
 
-When debug mode is enabled (via `debug on` in Serial or set to 1 in config), the ESP32-S3 starts a zero-configuration diagnostic hotspot:
+The ESP32-S3 hosts a full-featured real-time Cyberpunk / SCADA glassmorphic dashboard:
 
-* **Wi-Fi SSID**: `TankNode-Debug`
-* **Wi-Fi Password**: `12345678`
-* **Dashboard URL**: `http://192.168.4.1` (Captive Portal enabled: any request automatically redirects to dashboard)
-* **WebSocket Port**: `ws://192.168.4.1:81/` (broadcasting live telemetry JSON every 500ms)
+* **Always-Available Mode**: Enabled by default (`web_always_on = 1`), auto-starting on every boot. Can also be toggled dynamically via Serial (`web always on/off`) or Web UI.
+* **Dual Wi-Fi Architecture**:
+  * **Station Mode (STA)**: Connects to your existing Home Wi-Fi network if configured (`set wifi <ssid> <pass>`).
+  * **mDNS Responder**: Accessible on your local network at **`http://tanknode.local`** (no need to lookup dynamic IP addresses).
+  * **Fallback SoftAP**: If not connected to home Wi-Fi or when in standalone field use, broadcasts hotspot `TankNode-Debug` (password: `12345678`) at `http://192.168.4.1` with DNS Captive Portal.
+* **WebSocket Channel**: `ws://<ip>:81/` streaming live 500ms telemetry and accepting instantaneous remote commands.
 
-### Dashboard Features
-1. **Interactive Animated Reservoir**: Real-time visual depiction of water levels (Empty, Low, Mid, Full) with dynamic gradient waves.
-2. **Float Sensor Plausibility Status**: Shows each physical float switch reading and flags invalid sensor combinations in real time.
-3. **Pumps & Mode Control**: One-click toggle buttons for Manual/Auto modes, outflow pumps P1–P3, and remote pond pump.
-4. **Auto Pump Mask Configuration**: Checkbox selectors to include/exclude specific pumps in automatic irrigation cycles.
-5. **Runtime Configuration Inputs**: Dynamic input forms to adjust `Pump Min Runtime`, `Pump Cooldown`, and `Telemetry Interval` with live validation and Flash save confirmation toasts.
-6. **Live Telemetry & Diagnostics**: Real-time RSSI, SNR, Free Heap memory, device uptime, and boot counter.
+### Cyberpunk SCADA Visuals & Animation
+1. **Fluid Dual-Wave SVG Reservoir**: Multi-layered Sine-wave SVG animation representing real water volume (Empty, Low 33%, Mid 66%, Full 100%) with continuous particle bubbles rising.
+2. **Dynamic Inflow Water Jet & Splash**: When the Pond refill pump is active, a top-mounted animated water jet shoots down into the reservoir with expanding splash ripples on the water surface.
+3. **Outflow Pipes with Rotating Turbines**: Individual outflow pipes for P1, P2, and P3 featuring SVG turbine impellers that rotate smoothly when the respective pump is energized, accompanied by flowing directional stream dashes.
+4. **Floating Sensor Buoy Indicators**: Buoys float at discrete level heights (L1, L2, L3) with illuminated glowing status and plausibility fault markers.
+5. **Real-time Sparkline Canvas Chart**: 40-point historical telemetry trend tracking water level fluctuations and relay activations.
+6. **Web Audio API Sound Effects**: Synthesizer audio engine delivering tactile click tones, relay toggle chimes, and alert beeps (with one-click mute/unmute header control).
+7. **Pumps & Mode Control**: Immediate toggle buttons for Manual/Auto modes, outflow pumps P1–P3, and remote pond pump.
+8. **Auto Pump Mask Configuration**: Checkbox selectors to include/exclude specific pumps in automatic irrigation cycles.
+9. **Runtime Configuration Inputs**: Dynamic input forms to adjust `Pump Min Runtime`, `Pump Cooldown`, and `Telemetry Interval` with live validation and Flash save confirmation toasts.
+10. **Slide-Out Configuration Drawer**: Clean gear icon toggle revealing Wi-Fi STA setup, always-on toggles, and safety timings.
 
 ### Dual Serving Architecture (LittleFS + Embedded Fallback)
 The web assets are separated into clean, modern files inside `data/`:
 * `data/index.html` - Responsive semantic HTML5 dashboard
 * `data/style.css` - Glassmorphic modern responsive stylesheet
-* `data/app.js` - Real-time WebSocket communications & UI updater
+* `data/app.js` - Real-time WebSocket communications, sound engine & UI updater
 
 *Embedded PROGMEM Fallback*: `src/web_assets.h` contains a compiled standalone fallback page. Even if the user flashes firmware without uploading the LittleFS partition, the dashboard still renders completely!
 
@@ -271,3 +281,33 @@ pio run --target upload --upload-port COM3
 # 4. Open serial monitor at 921,600 baud
 pio device monitor -b 921600 -p COM3
 ```
+
+---
+
+## 9. Gateway Station & Pond Node Simulator (`run.py`)
+
+`run.py` interfaces with an **SX1302 LoRa Gateway** over UDP (ports `5555` / `5556`). It serves as the central control station and automated field simulator:
+
+### Features
+1. **Live Telemetry Decoding**: Decodes binary `MSG_STATUS` packets from Tank Node (`0x02`), parsing water level (0–3), pump relay states, Auto mode, pond demand, and environment metrics.
+2. **Autonomous Pond Node (`0x03`) Simulator**:
+   - Intercepts refill demand commands (`MSG_CMD` targeting `0x03`) issued by Tank Node.
+   - Automatically activates simulated pumping at **60.0 L/min**.
+   - Simulates volume pumped and run durations, printing real-time pumping logs:
+     ```text
+     🌊 [POND SIMULATOR] Tank demanded refill -> POND PUMP ENERGIZED (Rate: 60 L/min)
+     🛑 [POND SIMULATOR] Tank stopped refill -> Pump stopped. Delivered ~15.2 L in 15.2s
+     ```
+3. **Interactive Station Commands**:
+   - `/tank status` - Prints formatted telemetry HUD card of the latest Tank Node status.
+   - `/tank mode <auto|manual>` - Dispatches binary `MSG_CMD` over LoRa to toggle Tank Node operating mode.
+   - `/tank p1 <on|off>`, `/tank p2 <on|off>`, `/tank p3 <on|off>` - Dispatches remote commands to individual outflow pumps.
+   - `/tank pond <on|off>` - Dispatches remote command to start/stop the Pond pump cycle.
+   - `/pond status` - Displays simulator state, relay status, running time, and total liters delivered.
+   - `/pond sim <on|off>` - Enables or disables the autonomous pond simulator.
+
+### Running the Gateway Station
+```bash
+python run.py
+```
+Type `/help` within the interactive prompt to see all available station and gateway commands.
