@@ -249,7 +249,10 @@
           </div>
         </div>
         <div class="matrix-header-right">
+          <span class="matrix-delta-pill" id="mDeltaTicker">ALL SIGNALS STABLE</span>
           <span class="matrix-live-pill"><span class="matrix-pulse"></span>LIVE (500ms)</span>
+          <button class="matrix-act-btn" onclick="copyTelemetryJson()" title="Copy raw telemetry JSON to clipboard">📋 COPY JSON</button>
+          <button class="matrix-act-btn" onclick="sendJson({cmd:'get_config'})" title="Fetch Config from ESP32">🔄 REFRESH</button>
           <button class="matrix-toggle-btn" id="btnToggleMatrix" onclick="toggleMatrix()">COLLAPSE</button>
         </div>
       </div>
@@ -262,6 +265,43 @@
             <h4>PHYSICAL INPUTS (PCF8574 @ 0x27)</h4>
             <span class="subcard-badge" id="mPcfRaw">0xFF (0b11111111)</span>
           </div>
+
+          <!-- 8-Bit Visual Pin Bus Rack -->
+          <div class="pin-bus-rack" id="pinBusRack">
+            <div class="pin-chip" id="chipP0" title="Float 1 Contact (Low WL)"><span class="pin-num">P0</span><span class="pin-dot"></span><span class="pin-lbl">FS1</span></div>
+            <div class="pin-chip" id="chipP1" title="Float 2 Contact (Mid WL)"><span class="pin-num">P1</span><span class="pin-dot"></span><span class="pin-lbl">FS2</span></div>
+            <div class="pin-chip" id="chipP2" title="Float 3 Contact (High WL)"><span class="pin-num">P2</span><span class="pin-dot"></span><span class="pin-lbl">FS3</span></div>
+            <div class="pin-chip" id="chipP3" title="Button Mode Toggle"><span class="pin-num">P3</span><span class="pin-dot"></span><span class="pin-lbl">MODE</span></div>
+            <div class="pin-chip" id="chipP4" title="Button Pump 1 Toggle"><span class="pin-num">P4</span><span class="pin-dot"></span><span class="pin-lbl">P1</span></div>
+            <div class="pin-chip" id="chipP5" title="Button Pump 2 Toggle"><span class="pin-num">P5</span><span class="pin-dot"></span><span class="pin-lbl">P2</span></div>
+            <div class="pin-chip" id="chipP6" title="Button Pump 3 Toggle"><span class="pin-num">P6</span><span class="pin-dot"></span><span class="pin-lbl">P3</span></div>
+            <div class="pin-chip" id="chipP7" title="Button Pond Toggle"><span class="pin-num">P7</span><span class="pin-dot"></span><span class="pin-lbl">POND</span></div>
+          </div>
+
+          <!-- Dual Visual Level Comparison Bar -->
+          <div class="level-compare-box">
+            <div class="lvl-track">
+              <span class="lvl-title">RAW INPUT:</span>
+              <div class="segmented-meter" id="meterRawLvl">
+                <div class="seg" id="segRaw0">L0</div>
+                <div class="seg" id="segRaw1">L1</div>
+                <div class="seg" id="segRaw2">L2</div>
+                <div class="seg" id="segRaw3">L3</div>
+              </div>
+              <span class="lvl-val" id="valRawLvl">L0 (EMPTY)</span>
+            </div>
+            <div class="lvl-track">
+              <span class="lvl-title">FILTERED (ANTI-SLOSH):</span>
+              <div class="segmented-meter" id="meterStableLvl">
+                <div class="seg" id="segStb0">L0</div>
+                <div class="seg" id="segStb1">L1</div>
+                <div class="seg" id="segStb2">L2</div>
+                <div class="seg" id="segStb3">L3</div>
+              </div>
+              <span class="lvl-val" id="valStableLvl">L0 (EMPTY)</span>
+            </div>
+          </div>
+
           <div class="matrix-table">
             <div class="matrix-row">
               <span class="m-col-pin">P0 (Bit 0)</span>
@@ -311,43 +351,69 @@
           </div>
         </div>
 
-        <!-- 2. Physical Actuators & Outputs (Relays & GPIO) -->
+        <!-- 2. Physical Actuators & Relays (GPIO & Safety Locks) -->
         <div class="matrix-subcard">
           <div class="subcard-title">
             <span class="subcard-icon">⚡</span>
-            <h4>PHYSICAL ACTUATORS & RELAYS</h4>
+            <h4>ACTUATORS & RELAY SAFETY LOCKS</h4>
             <span class="subcard-badge">ACTIVE-LOW OPTO</span>
           </div>
+
+          <!-- Relay Visual Monitor Cards -->
+          <div class="relay-locks-grid">
+            <div class="relay-lock-item" id="lockCardP1">
+              <div class="lock-hdr">
+                <span class="lock-name">RELAY 1 (GPIO 47)</span>
+                <span class="lock-state" id="mRelay1State">OFF</span>
+              </div>
+              <div class="lock-bar-track"><div class="lock-bar-fill" id="lockBarP1" style="width: 0%;"></div></div>
+              <div class="lock-timer" id="mLockTimerP1">No active lock (Ready)</div>
+            </div>
+
+            <div class="relay-lock-item" id="lockCardP2">
+              <div class="lock-hdr">
+                <span class="lock-name">RELAY 2 (GPIO 41)</span>
+                <span class="lock-state" id="mRelay2State">OFF</span>
+              </div>
+              <div class="lock-bar-track"><div class="lock-bar-fill" id="lockBarP2" style="width: 0%;"></div></div>
+              <div class="lock-timer" id="mLockTimerP2">No active lock (Ready)</div>
+            </div>
+
+            <div class="relay-lock-item" id="lockCardP3">
+              <div class="lock-hdr">
+                <span class="lock-name">RELAY 3 (GPIO 39)</span>
+                <span class="lock-state" id="mRelay3State">OFF</span>
+              </div>
+              <div class="lock-bar-track"><div class="lock-bar-fill" id="lockBarP3" style="width: 0%;"></div></div>
+              <div class="lock-timer" id="mLockTimerP3">No active lock (Ready)</div>
+            </div>
+          </div>
+
           <div class="matrix-table">
             <div class="matrix-row">
               <span class="m-col-pin">GPIO 47</span>
-              <span class="m-col-name">Outflow Pump 1 Relay</span>
-              <span class="m-col-val" id="mRelay1"><span class="badge-tag idle">OFF (HIGH)</span></span>
+              <span class="m-col-name">Outflow Pump 1 Pin Level</span>
+              <span class="m-col-val" id="mRelay1"><span class="badge-tag idle">HIGH (DE-ENERGIZED)</span></span>
             </div>
             <div class="matrix-row">
               <span class="m-col-pin">GPIO 41</span>
-              <span class="m-col-name">Outflow Pump 2 Relay</span>
-              <span class="m-col-val" id="mRelay2"><span class="badge-tag idle">OFF (HIGH)</span></span>
+              <span class="m-col-name">Outflow Pump 2 Pin Level</span>
+              <span class="m-col-val" id="mRelay2"><span class="badge-tag idle">HIGH (DE-ENERGIZED)</span></span>
             </div>
             <div class="matrix-row">
               <span class="m-col-pin">GPIO 39</span>
-              <span class="m-col-name">Outflow Pump 3 Relay</span>
-              <span class="m-col-val" id="mRelay3"><span class="badge-tag idle">OFF (HIGH)</span></span>
+              <span class="m-col-name">Outflow Pump 3 Pin Level</span>
+              <span class="m-col-val" id="mRelay3"><span class="badge-tag idle">HIGH (DE-ENERGIZED)</span></span>
             </div>
             <div class="matrix-row">
               <span class="m-col-pin">LoRa 0x03</span>
-              <span class="m-col-name">Remote Pond Pump Demand</span>
+              <span class="m-col-name">Remote Pond Refill Demand</span>
               <span class="m-col-val" id="mPondDemand"><span class="badge-tag idle">IDLE</span></span>
             </div>
             <div class="matrix-row">
               <span class="m-col-pin">GPIO 48</span>
               <span class="m-col-name">WS2812B Diagnostic Strip</span>
               <span class="m-col-val" id="mNeoPixels"><span class="badge-tag ok">10x LEDs ACTIVE</span></span>
-            </div>
-            <div class="matrix-row">
-              <span class="m-col-pin">TIMERS</span>
-              <span class="m-col-name">Anti-Chatter Timers (P1/P2/P3)</span>
-              <span class="m-col-val" id="mTimers"><span class="badge-tag">No Active Lock</span></span>
             </div>
             <div class="matrix-row">
               <span class="m-col-pin">LIFETIME</span>
@@ -364,16 +430,26 @@
             <h4>RADIO & ENVIRONMENT</h4>
             <span class="subcard-badge">EU868 (868.1 MHz)</span>
           </div>
+
+          <!-- Signal Strength & Metrics Strip -->
+          <div class="radio-signal-strip">
+            <div class="sig-card">
+              <span class="sig-lbl">LORA RSSI</span>
+              <div class="sig-val" id="mRssiVal">-- dBm</div>
+              <div class="sig-bar-box"><div class="sig-bar-fill" id="mRssiBar" style="width: 0%;"></div></div>
+            </div>
+            <div class="sig-card">
+              <span class="sig-lbl">LORA SNR</span>
+              <div class="sig-val" id="mSnrVal">-- dB</div>
+              <span class="badge-tag ok" id="mSnrRating">UNKNOWN</span>
+            </div>
+          </div>
+
           <div class="matrix-table">
             <div class="matrix-row">
               <span class="m-col-pin">SPI (FSPI)</span>
               <span class="m-col-name">SX1262 LoRa Transceiver</span>
               <span class="m-col-val" id="mRadioHealth"><span class="badge-tag ok">ONLINE</span></span>
-            </div>
-            <div class="matrix-row">
-              <span class="m-col-pin">METRICS</span>
-              <span class="m-col-name">Packet RSSI / SNR</span>
-              <span class="m-col-val" id="mRadioMetrics">-- dBm / -- dB</span>
             </div>
             <div class="matrix-row">
               <span class="m-col-pin">NODES</span>
@@ -405,6 +481,16 @@
             <h4>MCU HEALTH & NVS CONFIG</h4>
             <span class="subcard-badge">ESP32-S3</span>
           </div>
+
+          <!-- RAM Heap Meter -->
+          <div class="heap-meter-box">
+            <div class="heap-hdr">
+              <span>SRAM USAGE</span>
+              <span id="mHeapPercent">--% Free</span>
+            </div>
+            <div class="heap-track"><div class="heap-fill" id="mHeapFill" style="width: 0%;"></div></div>
+          </div>
+
           <div class="matrix-table">
             <div class="matrix-row">
               <span class="m-col-pin">CPU / RAM</span>

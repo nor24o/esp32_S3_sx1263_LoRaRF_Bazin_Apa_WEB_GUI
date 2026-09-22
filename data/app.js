@@ -457,6 +457,9 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // ─── TOGGLE LIVE MATRIX PANEL ──────────────────────────────────────
+let lastTelemetryObj = null;
+let prevTelemetryData = null;
+
 function toggleMatrix() {
   playClick();
   const content = document.getElementById("matrixContent");
@@ -465,8 +468,53 @@ function toggleMatrix() {
   btn.innerText = isCollapsed ? "EXPAND" : "COLLAPSE";
 }
 
+function copyTelemetryJson() {
+  if (!lastTelemetryObj) {
+    showToast("No telemetry data yet!", true);
+    return;
+  }
+  const txt = JSON.stringify(lastTelemetryObj, null, 2);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(() => {
+      showToast("Telemetry JSON copied to clipboard!", false);
+      playClick();
+    }).catch(() => {
+      showToast("Clipboard copy failed", true);
+    });
+  } else {
+    showToast("Clipboard not supported in browser", true);
+  }
+}
+
 // ─── MATRIX RENDERING ──────────────────────────────────────────────
 function renderMatrix(t) {
+  lastTelemetryObj = t;
+
+  // 0. Delta Change Detection
+  const deltaTicker = document.getElementById("mDeltaTicker");
+  if (deltaTicker && prevTelemetryData) {
+    const changes = [];
+    if (t.wl !== prevTelemetryData.wl) changes.push(`WL: ${prevTelemetryData.wl} ➔ ${t.wl}`);
+    if (t.mode !== prevTelemetryData.mode) changes.push(`Mode: ${t.mode}`);
+    if (t.pumps) {
+      for (let i = 0; i < 3; i++) {
+        if (Boolean(t.pumps[i]) !== Boolean(prevTelemetryData.pumps?.[i])) {
+          changes.push(`P${i+1}: ${t.pumps[i] ? 'ON' : 'OFF'}`);
+        }
+      }
+    }
+    if (t.demand !== prevTelemetryData.demand) {
+      changes.push(`Pond Refill: ${t.demand ? 'ACTIVE' : 'IDLE'}`);
+    }
+
+    if (changes.length > 0) {
+      deltaTicker.innerText = `DELTA: ${changes.join(" | ")}`;
+      deltaTicker.classList.add("changed");
+      setTimeout(() => deltaTicker.classList.remove("changed"), 2500);
+    }
+  }
+  prevTelemetryData = { ...t, pumps: [...(t.pumps || [])] };
+
   // 1. Physical Inputs (PCF8574)
   if (t.pcf_raw !== undefined) {
     const rawByte = t.pcf_raw;
@@ -478,33 +526,55 @@ function renderMatrix(t) {
     // Float bits: 0 = submerged, 1 = dry
     if (t.floats) {
       const fNames = ["mFloat1", "mFloat2", "mFloat3"];
+      const chips = ["chipP0", "chipP1", "chipP2"];
       t.floats.forEach((f, idx) => {
+        const isSub = (f === 0);
         const el = document.getElementById(fNames[idx]);
         if (el) {
-          const isSub = (f === 0);
           el.innerHTML = isSub 
             ? `<span class="badge-tag submerged">SUBMERGED (0)</span>`
             : `<span class="badge-tag idle">DRY (1)</span>`;
         }
+        const chip = document.getElementById(chips[idx]);
+        if (chip) chip.classList.toggle("active", isSub);
       });
     }
 
     // Button bits: 0 = pressed, 1 = idle
     if (t.buttons) {
       const bNames = ["mBtnMode", "mBtnP1", "mBtnP2", "mBtnP3", "mBtnPond"];
+      const chips = ["chipP3", "chipP4", "chipP5", "chipP6", "chipP7"];
       t.buttons.forEach((b, idx) => {
+        const isPressed = (b === 0);
         const el = document.getElementById(bNames[idx]);
         if (el) {
-          const isPressed = (b === 0);
           el.innerHTML = isPressed 
             ? `<span class="badge-tag pressed">PRESSED (0)</span>`
             : `<span class="badge-tag idle">IDLE (1)</span>`;
         }
+        const chip = document.getElementById(chips[idx]);
+        if (chip) chip.classList.toggle("pressed", isPressed);
       });
     }
   }
 
-  // Plausibility & Debounced Level
+  // Dual Segmented Level Bars
+  const rawLvl = (t.raw_wl !== undefined) ? t.raw_wl : t.wl;
+  const stableLvl = t.wl;
+  const lvlLabels = ["L0 (EMPTY)", "L1 (LOW 33%)", "L2 (MID 66%)", "L3 (FULL 100%)"];
+
+  for (let i = 0; i < 4; i++) {
+    const rSeg = document.getElementById(`segRaw${i}`);
+    if (rSeg) rSeg.classList.toggle("active", i <= rawLvl && rawLvl > 0);
+    const sSeg = document.getElementById(`segStb${i}`);
+    if (sSeg) sSeg.classList.toggle("active", i <= stableLvl && stableLvl > 0);
+  }
+  const valRaw = document.getElementById("valRawLvl");
+  if (valRaw) valRaw.innerText = lvlLabels[rawLvl] || `L${rawLvl}`;
+  const valStb = document.getElementById("valStableLvl");
+  if (valStb) valStb.innerText = lvlLabels[stableLvl] || `L${stableLvl}`;
+
+  // Plausibility & Debounced Level Table Row
   const plausEl = document.getElementById("mPlausibility");
   if (plausEl) {
     if (t.err === 4) {
@@ -512,23 +582,65 @@ function renderMatrix(t) {
     } else if (t.err === 2) {
       plausEl.innerHTML = `<span class="badge-tag fault">I²C DISCONNECTED</span>`;
     } else {
-      const rawText = (t.raw_wl !== undefined) ? ` (Raw: L:${t.raw_wl})` : "";
-      plausEl.innerHTML = `<span class="badge-tag ok">VALID (L:${t.wl})${rawText}</span>`;
+      plausEl.innerHTML = `<span class="badge-tag ok">VALID (L:${t.wl})</span>`;
     }
   }
 
-  // 2. Physical Actuators & Relays
-  if (t.pumps) {
-    const rNames = ["mRelay1", "mRelay2", "mRelay3"];
-    t.pumps.forEach((p, idx) => {
-      const el = document.getElementById(rNames[idx]);
-      if (el) {
-        const isOn = Boolean(p);
-        el.innerHTML = isOn
-          ? `<span class="badge-tag running">RUNNING (LOW)</span>`
-          : `<span class="badge-tag idle">OFF (HIGH)</span>`;
+  // 2. Physical Actuators & Relay Safety Locks
+  const minRunMs = t.cfg_runtime || 20000;
+  const minCdMs = t.cfg_cooldown || 20000;
+
+  for (let i = 0; i < 3; i++) {
+    const pNum = i + 1;
+    const isOn = Boolean(t.pumps?.[i]);
+    const rLeft = t.run_left?.[i] || 0;
+    const cLeft = t.cd_left?.[i] || 0;
+
+    // Pin level text in table
+    const rRow = document.getElementById(`mRelay${pNum}`);
+    if (rRow) {
+      rRow.innerHTML = isOn
+        ? `<span class="badge-tag running">LOW (ENERGIZED / PUMPING)</span>`
+        : `<span class="badge-tag idle">HIGH (DE-ENERGIZED / IDLE)</span>`;
+    }
+
+    // Monitor card
+    const stBadge = document.getElementById(`mRelay${pNum}State`);
+    if (stBadge) {
+      stBadge.innerText = isOn ? "RUNNING" : "OFF";
+      stBadge.className = isOn ? "lock-state running" : "lock-state";
+    }
+
+    const bar = document.getElementById(`lockBarP${pNum}`);
+    const tmr = document.getElementById(`mLockTimerP${pNum}`);
+
+    if (isOn && rLeft > 0) {
+      const pct = Math.round((rLeft / (minRunMs / 1000)) * 100);
+      if (bar) {
+        bar.style.width = `${pct}%`;
+        bar.style.background = "var(--cyan)";
       }
-    });
+      if (tmr) {
+        tmr.innerText = `Min Runtime Lock: ${rLeft}s remaining`;
+        tmr.className = "lock-timer active";
+      }
+    } else if (!isOn && cLeft > 0) {
+      const pct = Math.round((cLeft / (minCdMs / 1000)) * 100);
+      if (bar) {
+        bar.style.width = `${pct}%`;
+        bar.style.background = "var(--amber)";
+      }
+      if (tmr) {
+        tmr.innerText = `Cooldown Lock: ${cLeft}s remaining`;
+        tmr.className = "lock-timer active";
+      }
+    } else {
+      if (bar) bar.style.width = "0%";
+      if (tmr) {
+        tmr.innerText = "No active lock (Ready)";
+        tmr.className = "lock-timer";
+      }
+    }
   }
 
   const pondDemandEl = document.getElementById("mPondDemand");
@@ -536,25 +648,6 @@ function renderMatrix(t) {
     pondDemandEl.innerHTML = t.demand 
       ? `<span class="badge-tag active">ACTIVE REFILL DEMAND</span>`
       : `<span class="badge-tag idle">IDLE</span>`;
-  }
-
-  // Timers (Runtime remaining / Cooldown remaining)
-  const timersEl = document.getElementById("mTimers");
-  if (timersEl) {
-    let timerTexts = [];
-    if (t.run_left) {
-      t.run_left.forEach((r, idx) => {
-        if (r > 0) timerTexts.push(`P${idx+1} RunLock:${r}s`);
-      });
-    }
-    if (t.cd_left) {
-      t.cd_left.forEach((c, idx) => {
-        if (c > 0) timerTexts.push(`P${idx+1} Cooldown:${c}s`);
-      });
-    }
-    timersEl.innerHTML = timerTexts.length > 0 
-      ? `<span class="badge-tag pressed">${timerTexts.join(" | ")}</span>`
-      : `<span class="badge-tag idle">No Active Lock</span>`;
   }
 
   // Lifetime Runtimes
@@ -567,13 +660,33 @@ function renderMatrix(t) {
   const radioHealthEl = document.getElementById("mRadioHealth");
   if (radioHealthEl) {
     radioHealthEl.innerHTML = (t.radio_ok !== 0 && t.err !== 1)
-      ? `<span class="badge-tag ok">ONLINE</span>`
+      ? `<span class="badge-tag ok">ONLINE (16 MHz SPI)</span>`
       : `<span class="badge-tag fault">RADIO FAULT</span>`;
   }
 
-  const radioMetricsEl = document.getElementById("mRadioMetrics");
-  if (radioMetricsEl) {
-    radioMetricsEl.innerText = `${t.rssi} dBm / ${t.snr} dB`;
+  // Signal Strip
+  const rssiVal = document.getElementById("mRssiVal");
+  if (rssiVal) rssiVal.innerText = `${t.rssi} dBm`;
+  const rssiBar = document.getElementById("mRssiBar");
+  if (rssiBar) {
+    const pct = Math.min(100, Math.max(5, (t.rssi + 130) * (100 / 90)));
+    rssiBar.style.width = `${pct}%`;
+  }
+
+  const snrVal = document.getElementById("mSnrVal");
+  if (snrVal) snrVal.innerText = `${t.snr} dB`;
+  const snrRating = document.getElementById("mSnrRating");
+  if (snrRating) {
+    if (t.snr >= 6) {
+      snrRating.innerText = "EXCELLENT";
+      snrRating.className = "badge-tag ok";
+    } else if (t.snr >= 0) {
+      snrRating.innerText = "GOOD";
+      snrRating.className = "badge-tag active";
+    } else {
+      snrRating.innerText = "WEAK";
+      snrRating.className = "badge-tag fault";
+    }
   }
 
   const tempEl = document.getElementById("mTemp");
@@ -587,9 +700,18 @@ function renderMatrix(t) {
   }
 
   // 4. MCU & Network
+  const freeBytes = t.heap || 0;
+  const freeKb = Math.round(freeBytes / 1024);
+  const totalSram = 327680;
+  const freePct = Math.min(100, Math.round((freeBytes / totalSram) * 100));
+
+  const heapPct = document.getElementById("mHeapPercent");
+  if (heapPct) heapPct.innerText = `${freeKb} KB (${freePct}% Free)`;
+  const heapFill = document.getElementById("mHeapFill");
+  if (heapFill) heapFill.style.width = `${freePct}%`;
+
   const heapEl = document.getElementById("mMcuHeap");
   if (heapEl) {
-    const freeKb = Math.round((t.heap || 0) / 1024);
     const minKb = Math.round((t.min_heap || 0) / 1024);
     heapEl.innerText = `${freeKb} KB (Min: ${minKb} KB)`;
   }

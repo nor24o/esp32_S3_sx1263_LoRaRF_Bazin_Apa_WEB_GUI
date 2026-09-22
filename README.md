@@ -257,7 +257,13 @@ The ESP32-S3 hosts a full-featured real-time Cyberpunk / SCADA glassmorphic dash
 10. **Slide-Out Configuration Drawer**: Clean gear icon toggle revealing Wi-Fi STA setup, always-on toggles, and safety timings.
 11. **Live System I/O & Parameters SCADA Matrix**:
     - **Header Quick Toggle**: Click `[📊]` to instantly show or collapse the live inspector matrix.
-    - **Physical Digital Inputs Table**: Real-time PCF8574 raw port byte (`0x..` / `0b........`), individual contact status for Float 1, Float 2, Float 3 (`SUBMERGED (0)` / `DRY (1)`), individual push buttons (`PRESSED (0)` / `IDLE (1)`), debounced level vs raw level, and sensor plausibility health.
+    - **8-Bit Digital Input Bus Rack**: Live visual IC microchip representation displaying inputs P0–P7 (float switches and push buttons) with dynamic active/low/high pin states.
+    - **Dual Segmented Level Comparator**: Side-by-side comparison of instant raw float sensor readings (`segRaw0`–`segRaw3`) vs anti-slosh debounced filtered levels (`segStb0`–`segStb3`).
+    - **Relay Safety Lock Countdown Meters**: Real-time progress bars showing remaining runtime protection and cooldown countdown timers for pumps P1, P2, and P3.
+    - **Radio Signal Strength Meter**: Live RSSI graphical meter bar (dBm) accompanied by LoRa SNR signal quality badge.
+    - **SRAM Heap Memory Gauge**: Visual memory usage bar with free heap and minimum watermark tracking.
+    - **Live Delta Ticker & JSON Clipboard Tool**: Flashing ticker banner highlighting parameter transitions, plus a one-click `📋 COPY JSON` button to instantly export raw telemetry diagnostics.
+    - **Physical Digital Inputs Table**: Real-time PCF8574 raw port byte (`0x..` / `0b........`), contact status for Float 1, Float 2, Float 3 (`SUBMERGED (0)` / `DRY (1)`), push buttons (`PRESSED (0)` / `IDLE (1)`), and sensor plausibility health.
     - **Physical Actuators & Relays Table**: Direct pin levels for GPIO 47, 41, 39 (`LOW=RUNNING` / `HIGH=IDLE`), remaining anti-chatter runtime lock and cooldown countdown timers, total lifetime run seconds, and remote pond refill demand latch.
     - **Radio & Sensors Table**: SX1262 SPI health, EU868 RF parameters, live packet RSSI/SNR, ambient temperature, relative humidity, and I²C bus clock health.
     - **MCU & System Health Table**: ESP32-S3 240 MHz dual-core clock, free heap and minimum watermark, system uptime, boot count, connected SoftAP station count, Wi-Fi Station IP/RSSI, and mDNS link (`http://tanknode.local`).
@@ -296,8 +302,19 @@ pio device monitor -b 921600 -p COM3
 `run.py` interfaces with an **SX1302 LoRa Gateway** over UDP (ports `5555` / `5556`). It serves as the central control station and automated field simulator:
 
 ### Features
-1. **Live Telemetry Decoding**: Decodes binary `MSG_STATUS` packets from Tank Node (`0x02`), parsing water level (0–3), pump relay states, Auto mode, pond demand, and environment metrics.
-2. **Autonomous Pond Node (`0x03`) Simulator**:
+1. **Embedded Station Web GUI (`http://localhost:8080`)**:
+   - Zero-dependency built-in web server runs on Python's standard library `http.server`.
+   - Real-time animated water reservoir with dynamic filling height and state badges.
+   - Autonomous Pond Simulator control card displaying real-time pumped volume in Liters.
+   - Auto-updating live packet stream table (Type, Sender, Target, Summary, Raw Hex).
+   - Interactive remote action buttons for instant Tank Node control.
+   - REST API endpoints: `GET /api/data` (live telemetry state) and `POST /api/cmd` (execute station commands).
+2. **Terminal Delta Change Tracking**:
+   - Compares consecutive status packets and visibly alerts to state transitions:
+     ```text
+     🔥 [DELTA DETECTED] Water: 1/3 (LOW) -> 2/3 (MID) | P1: OFF -> ON
+     ```
+3. **Autonomous Pond Node (`0x03`) Simulator**:
    - Intercepts refill demand commands (`MSG_CMD` targeting `0x03`) issued by Tank Node.
    - Automatically activates simulated pumping at **60.0 L/min**.
    - Simulates volume pumped and run durations, printing real-time pumping logs:
@@ -305,8 +322,20 @@ pio device monitor -b 921600 -p COM3
      🌊 [POND SIMULATOR] Tank demanded refill -> POND PUMP ENERGIZED (Rate: 60 L/min)
      🛑 [POND SIMULATOR] Tank stopped refill -> Pump stopped. Delivered ~15.2 L in 15.2s
      ```
-3. **Interactive Station Commands**:
-   - `/tank status` - Prints formatted telemetry HUD card of the latest Tank Node status.
+4. **Interactive Station Commands**:
+   - `/gui` or `/web` - Automatically opens the Station Web GUI dashboard in your default browser.
+   - `/tank status` - Prints visual ASCII level bar gauge and formatted HUD card:
+     ```text
+     ┌─ Tank Node Live Telemetry (seen 2s ago) ─────────
+     │ Water Level : [███████░░░] MID   (66%)
+     │ System Mode : AUTO
+     │ Outflow P1  : ON
+     │ Outflow P2  : OFF
+     │ Outflow P3  : OFF
+     │ Pond Demand : IDLE
+     │ Environment : 24.5 °C, 55% RH
+     └─────────────────────────────────────────────────────
+     ```
    - `/tank mode <auto|manual>` - Dispatches binary `MSG_CMD` over LoRa to toggle Tank Node operating mode.
    - `/tank p1 <on|off>`, `/tank p2 <on|off>`, `/tank p3 <on|off>` - Dispatches remote commands to individual outflow pumps.
    - `/tank pond <on|off>` - Dispatches remote command to start/stop the Pond pump cycle.
@@ -322,4 +351,4 @@ Or directly from any command prompt:
 ```bash
 python run.py
 ```
-Type `/help` within the interactive prompt to see all available station and gateway commands.
+Type `/help` within the interactive prompt to see all available station and gateway commands, or type `/gui` to launch the web dashboard.

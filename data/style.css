@@ -1335,3 +1335,327 @@ body {
   color: #64748b;
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
+
+/* ─── ENHANCED SCADA MATRIX FEATURES ──────────────────────────── */
+.matrix-delta-pill {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--cyan);
+  background: rgba(0, 240, 255, 0.08);
+  border: 1px solid rgba(0, 240, 255, 0.25);
+  padding: 4px 9px;
+  border-radius: 20px;
+  letter-spacing: 0.04em;
+  transition: all 0.3s;
+}
+
+.matrix-delta-pill.changed {
+  color: #000;
+  background: var(--amber);
+  border-color: #fff;
+  box-shadow: 0 0 12px var(--amber);
+}
+
+.matrix-act-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e2e8f0;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.matrix-act-btn:hover {
+  background: rgba(0, 240, 255, 0.15);
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+/* 8-Bit Visual Pin Bus Rack */
+.pin-bus-rack {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.pin-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 6px 2px;
+  border-radius: 5px;
+  cursor: default;
+  transition: all 0.2s;
+}
+
+.pin-chip.active {
+  border-color: var(--green);
+  background: rgba(0, 255, 136, 0.12);
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.25);
+}
+
+.pin-chip.pressed {
+  border-color: var(--amber);
+  background: rgba(255, 170, 0, 0.15);
+  box-shadow: 0 0 8px rgba(255, 170, 0, 0.25);
+}
+
+.pin-num {
+  font-size: 0.62rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: #64748b;
+}
+
+.pin-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #334155;
+  transition: all 0.2s;
+}
+
+.pin-chip.active .pin-dot {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+.pin-chip.pressed .pin-dot {
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber);
+}
+
+.pin-lbl {
+  font-size: 0.58rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+/* Dual Level Comparison Box */
+.level-compare-box {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lvl-track {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.lvl-title {
+  color: #64748b;
+  width: 140px;
+  flex-shrink: 0;
+  font-size: 0.65rem;
+}
+
+.segmented-meter {
+  display: flex;
+  gap: 3px;
+  flex: 1;
+}
+
+.seg {
+  flex: 1;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.06);
+  color: #475569;
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 2px 0;
+  border-radius: 3px;
+  transition: all 0.2s;
+}
+
+.seg.active {
+  background: var(--cyan);
+  color: #000;
+  box-shadow: 0 0 8px var(--cyan-glow);
+}
+
+.lvl-val {
+  font-weight: 700;
+  font-size: 0.68rem;
+  color: var(--cyan);
+  width: 75px;
+  text-align: right;
+}
+
+/* Relay Safety Locks Grid */
+.relay-locks-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.relay-lock-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.lock-hdr {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.lock-name {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.lock-state {
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.65rem;
+  background: rgba(255, 255, 255, 0.06);
+  color: #64748b;
+}
+
+.lock-state.running {
+  background: rgba(0, 255, 136, 0.2);
+  color: var(--green);
+}
+
+.lock-bar-track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.lock-bar-fill {
+  height: 100%;
+  background: var(--cyan);
+  transition: width 0.3s;
+}
+
+.lock-timer {
+  font-size: 0.63rem;
+  font-family: var(--font-mono);
+  color: #64748b;
+}
+
+.lock-timer.active {
+  color: var(--amber);
+  font-weight: 600;
+}
+
+/* Radio Signal Strip */
+.radio-signal-strip {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sig-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sig-lbl {
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  color: #64748b;
+}
+
+.sig-val {
+  font-size: 0.95rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--cyan);
+}
+
+.sig-bar-box {
+  height: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.sig-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--red) 0%, var(--amber) 50%, var(--green) 100%);
+  transition: width 0.3s;
+}
+
+/* Heap Meter */
+.heap-meter-box {
+  margin-bottom: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.heap-hdr {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+.heap-track {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.heap-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--cyan), var(--green));
+  transition: width 0.3s;
+}
+
+/* Delta Flash effect */
+@keyframes deltaGlow {
+  0% { background: rgba(0, 240, 255, 0.3); }
+  100% { background: transparent; }
+}
+
+.delta-flash {
+  animation: deltaGlow 0.8s ease-out;
+}
+
