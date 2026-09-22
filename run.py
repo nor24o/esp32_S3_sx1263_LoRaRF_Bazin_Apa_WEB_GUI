@@ -498,6 +498,7 @@ def safe_print(msg: str):
     print this message, and restore your input line seamlessly underneath.
     """
     print(msg)
+    sys.stdout.flush()
 
 # ── Packet parsers ────────────────────────────────────────────────────────────
 
@@ -1135,14 +1136,22 @@ def main():
     print("=" * 66)
     print("Waiting for gateway boot packet...\n")
 
-    # Start an interactive prompt session
-    session = PromptSession()
-
-    # The patch_stdout context manager hooks into sys.stdout automatically
-    with patch_stdout():
+    try:
+        session = PromptSession()
+        with patch_stdout():
+            while True:
+                try:
+                    user_line = session.prompt("> ")
+                    handle(user_line)
+                except KeyboardInterrupt:
+                    print("\nExiting.")
+                    break
+                except EOFError:
+                    break
+    except Exception:
         while True:
             try:
-                user_line = session.prompt("> ")
+                user_line = input("> ")
                 handle(user_line)
             except KeyboardInterrupt:
                 print("\nExiting.")
