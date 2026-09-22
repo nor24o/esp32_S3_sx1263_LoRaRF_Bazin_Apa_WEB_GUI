@@ -297,50 +297,46 @@ pio device monitor -b 921600 -p COM3
 
 ---
 
-## 9. Gateway Station & Pond Node Simulator (`run.py`)
+## 9. Universal LoRa Fleet Coordinator & Multi-Node Simulator (`run.py`)
 
-`run.py` interfaces with an **SX1302 LoRa Gateway** over UDP (ports `5555` / `5556`). It serves as the central control station and automated field simulator:
+`run.py` interfaces with an **SX1302 LoRa Gateway** over UDP (`5555` uplink / `5556` downlink). It acts as an extensible, universal network coordinator, dynamic node registry, and autonomous field node simulator:
 
-### Features
-1. **Embedded Station Web GUI (`http://localhost:8080`)**:
-   - Zero-dependency built-in web server runs on Python's standard library `http.server`.
-   - Real-time animated water reservoir with dynamic filling height and state badges.
-   - Autonomous Pond Simulator control card displaying real-time pumped volume in Liters.
-   - Auto-updating live packet stream table (Type, Sender, Target, Summary, Raw Hex).
-   - Interactive remote action buttons for instant Tank Node control.
-   - REST API endpoints: `GET /api/data` (live telemetry state) and `POST /api/cmd` (execute station commands).
-2. **Terminal Delta Change Tracking**:
-   - Compares consecutive status packets and visibly alerts to state transitions:
-     ```text
-     🔥 [DELTA DETECTED] Water: 1/3 (LOW) -> 2/3 (MID) | P1: OFF -> ON
-     ```
-3. **Autonomous Pond Node (`0x03`) Simulator**:
-   - Intercepts refill demand commands (`MSG_CMD` targeting `0x03`) issued by Tank Node.
-   - Automatically activates simulated pumping at **60.0 L/min**.
-   - Simulates volume pumped and run durations, printing real-time pumping logs:
-     ```text
-     🌊 [POND SIMULATOR] Tank demanded refill -> POND PUMP ENERGIZED (Rate: 60 L/min)
-     🛑 [POND SIMULATOR] Tank stopped refill -> Pump stopped. Delivered ~15.2 L in 15.2s
-     ```
-4. **Interactive Station Commands**:
-   - `/gui` or `/web` - Automatically opens the Station Web GUI dashboard in your default browser.
-   - `/tank status` - Prints visual ASCII level bar gauge and formatted HUD card:
-     ```text
-     ┌─ Tank Node Live Telemetry (seen 2s ago) ─────────
-     │ Water Level : [███████░░░] MID   (66%)
-     │ System Mode : AUTO
-     │ Outflow P1  : ON
-     │ Outflow P2  : OFF
-     │ Outflow P3  : OFF
-     │ Pond Demand : IDLE
-     │ Environment : 24.5 °C, 55% RH
-     └─────────────────────────────────────────────────────
-     ```
-   - `/tank mode <auto|manual>` - Dispatches binary `MSG_CMD` over LoRa to toggle Tank Node operating mode.
-   - `/tank p1 <on|off>`, `/tank p2 <on|off>`, `/tank p3 <on|off>` - Dispatches remote commands to individual outflow pumps.
-   - `/tank pond <on|off>` - Dispatches remote command to start/stop the Pond pump cycle.
-   - `/pond status` - Displays simulator state, relay status, running time, and total liters delivered.
-   - `/pond sim <on|off>` - Enables or disables the autonomous pond simulator.
+### Core Capabilities
+1. **Universal Dynamic Node Registry (`0x01`–`0xFF`)**:
+   - Manages all physical and simulated devices across the network with auto-discovery:
+     - **`0x01`**: Gateway Coordinator (SX1302 Concentrator & UDP Hub)
+     - **`0x02`**: Tank Node (ESP32-S3 Level Floats & 3x Outflow Relays)
+     - **`0x03`**: Pond Node Simulator (Remote Pond Charging Pump & Source Monitor)
+     - **`0x04`–`0xFE`**: Dynamically discovered field nodes (valves, weather sensors, etc.)
+   - Tracks per-node online/offline/timeout health, packet counts, last seen timestamps, and signal quality (`RSSI` dBm & `SNR` dB).
+
+2. **Active Pond Node (`0x03`) Simulator**:
+   - **Autonomous Pump Relay Integration**: Intercepts `MSG_CMD` refill demand packets from Tank Node (`0x02`), starts the simulated pump, and integrates total volume delivered at a configurable flow rate (default: **60.0 L/min**).
+   - **Real LoRa RF Transmissions**: Broadcasts genuine binary `MSG_STATUS` frames from `sender=0x03` into the air via the SX1302 downlink (`:5556`), providing real over-the-air status beacons and state change acknowledgments to physical field nodes.
+   - **Full Environmental Metrics**: Simulates pond reservoir level (% full), solar battery bank (12.8V), solar charging power (45W), and water temperature.
+
+3. **Multi-Node Fleet SCADA Web Dashboard (`http://localhost:8080`)**:
+   - Dynamic Cyberpunk grid rendering dedicated cards for each discovered or simulated node in the network.
+   - **Interactive Pond Simulator Card**: Live pump relay status, manual start/stop triggers, volume counter, flow rate, reservoir gauge, and "Send LoRa RF Beacon" button.
+   - **Interactive Tank Card**: Animated water reservoir graphic, mode indicator, outflow relay tags, and quick toggle buttons.
+   - **Universal Command Console**: Web-based CLI bar allowing arbitrary station commands to be executed directly from the browser.
+   - **Decoded Packet Stream**: 1-second auto-refreshing table with node color badges (Cyan, Emerald, Amber, Purple) and raw hex payloads.
+   - **REST API**: `GET /api/data`, `GET /api/nodes`, `POST /api/cmd`.
+
+4. **Universal Command Interface**:
+   - `/nodes` - Formatted table displaying all registered and discovered fleet nodes.
+   - `/node <id> status` - Deep inspection of any node's metrics and signal quality.
+   - `/node <id> cmd <target> <act> <val>` - Transmit arbitrary command byteframe to any node.
+   - `/send <target> <sender> <type> <hex>` - Inject custom LoRa packet between any two nodes.
+   - `/pond status` - Displays simulated pond pump state, volume, level, and power.
+   - `/pond sim start|stop` - Manually turn simulated pond pump on/off.
+   - `/pond sim tx` - Transmit immediate LoRa RF status beacon from Node `0x03`.
+   - `/pond sim flow <lpm>` - Configure simulated flow rate in Liters/min.
+   - `/pond sim level <0-100>` - Set simulated pond reservoir percentage.
+   - `/pond sim rf <on|off>` - Enable or disable genuine LoRa RF downlinks from simulator.
+   - `/tank status` - Renders formatted telemetry HUD card with visual ASCII level gauge (`[███████░░░] MID (66%)`).
+   - `/tank mode <auto|man>`, `/tank p1|p2|p3 <on|off|toggle>`, `/tank pond <on|off|toggle>`.
+   - `/gui` or `/web` - Automatically opens the Fleet Web Dashboard in your default browser.
 
 ### Dedicated Terminal Launcher
 To launch a dedicated, standalone interactive terminal window for `run.py` with custom window title and UTF-8 encoding:

@@ -1,56 +1,48 @@
-# Walkthrough: Enhanced SCADA Matrix & Station Web Dashboard GUI
+# Walkthrough: Universal Multi-Node Coordinator & Pond Node Simulator (`run.py`)
 
-We implemented:
-1. **Upgraded Web SCADA Matrix Panel**:
-   - **8-Bit Digital Input Bus Rack**: Live visual IC microchip representation displaying inputs `P0`–`P7` (float switches and push buttons) with dynamic active/low/high pin states.
-   - **Dual Segmented Level Comparator**: Side-by-side comparison of instant raw float sensor readings (`segRaw0`–`segRaw3`) vs anti-slosh debounced filtered levels (`segStb0`–`segStb3`).
-   - **Relay Safety Lock Countdown Meters**: Real-time progress bars showing remaining runtime protection and cooldown countdown timers for pumps P1, P2, and P3.
-   - **Radio Signal Strength Meter**: Live RSSI graphical meter bar (dBm) accompanied by LoRa SNR signal quality badge.
-   - **SRAM Heap Memory Gauge**: Visual memory usage bar with free heap and minimum watermark tracking.
-   - **Live Delta Ticker & JSON Clipboard Tool**: Flashing ticker banner highlighting parameter transitions, plus a one-click `📋 COPY JSON` button to instantly export raw telemetry diagnostics.
-2. **Station Web Dashboard & Visual Terminal in `run.py`**:
-   - **Embedded Station Web GUI (`http://localhost:8080`)**: Zero-dependency built-in web server runs on Python's standard library `http.server`. Renders an animated Cyberpunk SCADA dashboard showing the water reservoir, autonomous Pond simulator metrics, auto-updating live packet stream table, and interactive command buttons.
-   - **REST API Endpoints**: `/api/data` for live JSON telemetry streaming and `/api/cmd` for remote command dispatch.
-   - **Interactive `/gui` Command**: Typing `/gui` or `/web` in the terminal opens the station dashboard in the default web browser automatically.
-   - **Terminal Delta Change Tracking**: Compares consecutive status packets and visibly alerts to state transitions:
-     `🔥 [DELTA DETECTED] Water: 1/3 (LOW) -> 2/3 (MID) | P1: OFF -> ON`
-   - **Visual ASCII Tank Level Gauge**: Upgraded `/tank status` to print a high-contrast visual bar gauge:
-     `Water Level : [███████░░░] MID   (66%)`
-3. **Filesystem Flashing & Testing**:
-   - Built and uploaded the LittleFS partition containing the enhanced assets to ESP32-S3 `COM3`.
-   - Verified `run.py` with Python unit tests: server binding, REST API, HTML rendering, delta detection, and command handler all pass with 0 errors.
-
----
-
-## 1. Key Accomplishments
-
-### A. Web SCADA Matrix Upgrades (`data/index.html`, `data/style.css`, `data/app.js`)
-- **8-Bit Digital Pin Bus Rack**: Styled like an integrated circuit chip with 8 pins (`P0`–`P7`). Floats (`P0`–`P2`) illuminate with cyan status when submerged; buttons (`P3`–`P7`) pulse amber when pressed.
-- **Dual Segmented Meter**: Instantaneous float bits vs 2.5s anti-slosh debounced level displayed in parallel segmented bars, providing immediate visual verification of debounce logic.
-- **Relay Lock Progress Bars**: Dynamic percentage bars counting down `Min Runtime Active` and `Cooldown Remaining` timers for each relay.
-- **Radio & Heap Gauges**: High-resolution RSSI meter (-120 dBm to -40 dBm), LoRa SNR rating tag, and ESP32-S3 SRAM free heap percentage bar.
-- **Export & Delta Ticker**: Added a top toolbar with `📋 COPY JSON` button (copies full live telemetry to clipboard with animated toast) and a flashing delta ticker showing what changed.
-
-### B. Gateway Station Web GUI & Terminal Upgrades (`run.py`)
-- **Single-File Station Web GUI**: Embedded inside `run.py` (served on port `8080`), requiring zero external pip dependencies.
-- **Animated Reservoir & Pond Cards**: Shows real-time water level, pump operating states, and total volume delivered by the autonomous pond simulator.
-- **Live LoRa Packet Table**: Displays decoded packets in real-time with automatic 1.2-second refresh.
-- **CLI Upgrades**:
-  - `/gui` or `/web`: Launches browser directly to `http://localhost:8080`.
-  - `/tank status`: Displays high-contrast ASCII bar gauge `[██████████] FULL (100%)`.
-  - `🔥 [DELTA DETECTED]`: Visually flags when water level, operational mode, pump relays, or pond demand changes.
+We transformed `run.py` into a **Universal LoRa Network Coordinator and Multi-Node Station & Simulator**:
+1. **Universal Dynamic Node Registry (`0x01`–`0xFF`)**:
+   - Manages all physical and simulated field nodes with automatic over-the-air discovery.
+   - Default built-in node profiles for **Gateway Coordinator (`0x01`)**, **Tank Node (`0x02`)**, and **Pond Node (`0x03`)**.
+   - Tracks per-node online/offline/timeout health, packet counters, RSSI/SNR signal quality, and live metrics.
+2. **Active Pond Node (`0x03`) Simulator with Real LoRa RF Transmissions**:
+   - Intercepts remote refill requests (`MSG_CMD` targeting `0x03`) issued by the Tank Node (`0x02`), updates pump state, and accumulates volume at a configurable rate (**60.0 L/min**).
+   - **Real Over-the-Air LoRa Transmissions**: Broadcasts genuine binary `MSG_STATUS` frames from `sender_id = 0x03` into the air via the SX1302 gateway downlink (UDP `:5556`), allowing physical nodes to receive real over-the-air responses.
+   - Provides full telemetry simulation: reservoir level percentage, solar battery bank (12.8V), solar charging power (45W), and water temperature.
+3. **Multi-Node Fleet SCADA Web Dashboard (`http://localhost:8080`)**:
+   - Dynamic Cyberpunk grid featuring separate interactive cards for every node in the network.
+   - **Interactive Pond Simulator Card**: Live pump relay status, manual start/stop controls, volume counter, flow rate input, reservoir gauge, and "Send LoRa RF Beacon" button.
+   - **Interactive Tank Card**: Animated water reservoir graphic, mode tag, outflow pump status, and quick control buttons.
+   - **Universal Command Console**: Execute arbitrary station CLI commands directly in the browser.
+   - **Decoded Packet Stream**: 1-second auto-refreshing table with node color badges and hex payloads.
+   - **REST API**: `GET /api/data`, `GET /api/nodes`, `POST /api/cmd`.
+4. **Universal Command Interface**:
+   - `/nodes` - Formatted ASCII table of all network nodes.
+   - `/node <id> status` - Deep inspection of any node's metrics and signal quality.
+   - `/node <id> cmd <t> <a> <v>` - Transmit arbitrary command to any node.
+   - `/send <tgt> <src> <typ> <hex>` - Custom packet injection between any two nodes.
+   - `/pond status`, `/pond sim start|stop|tx|flow|level|rf`.
+   - `/tank status`, `/tank mode`, `/tank p1|p2|p3|pond`.
+   - `/gui` or `/web` - Open the Fleet Web Dashboard in the browser.
 
 ---
 
-## 2. Verification & Validation
+## Verification & Validation
 
-1. **LittleFS Filesystem Flash (`pio run --target uploadfs --upload-port COM3`)**:
-   - Packaged `data/index.html`, `data/style.css`, and `data/app.js`.
-   - Flashed to LittleFS partition at `0x00670000` on `COM3`:
-   - `[SUCCESS] in 19.35 seconds`
-2. **Python Syntax & Runtime Verification (`python run.py`)**:
-   - Syntax validation: `py_compile.compile('run.py', doraise=True)` passed with 0 errors.
-   - HTTP server test: `GET http://localhost:8080/` returned status 200 with complete HTML.
-   - REST API test: `GET http://localhost:8080/api/data` returned live JSON state with keys `['gateway_ip', 'pkt_counter', 'tank', 'pond_sim', 'packets']`.
-   - Delta detection test: Verified consecutive packet evaluation produced `🔥 [DELTA DETECTED] Water: 2/3 (MID) -> 3/3 (FULL) | P1: OFF -> ON`.
-   - ASCII gauge test: `/tank status` cleanly rendered visual bar gauge.
+1. **Automated Test Suite (`scratch/test_suite.py`)**:
+   - `NodeRegistry`: verified initial nodes (`0x01`, `0x02`, `0x03`), and verified auto-discovery of dynamically introduced node `0x04`.
+   - `PondSimulator`: verified state transitions, volume integration at 60 L/min, and binary `MSG_STATUS` frame generation.
+   - Packet Decoder: tested decoding Tank Node status frames and command interception by the Pond simulator.
+   - Delta Detection: verified `🔥 [DELTA DETECTED - Node 0x02] P1: OFF -> ON`.
+   - `[SUCCESS] in 1.12 seconds`.
+
+2. **Web Server & REST API Tests (`scratch/test_web.py`)**:
+   - `GET /`: Fleet HTML loaded with status 200.
+   - `GET /api/data`: returned live nodes dictionary, pond simulator state, and packet stream.
+   - `GET /api/nodes`: returned list of all registered node profiles.
+   - `POST /api/cmd`: executed `/nodes` command with `status: ok`.
+   - `[SUCCESS] in 0.85 seconds`.
+
+3. **Live Daemon Execution**:
+   - `run.py` is actively running as a background daemon process listening on UDP `0.0.0.0:5555` and TCP `0.0.0.0:8080`.
+   - Simulated pond pump start/stop verified via live REST API commands.
