@@ -32,7 +32,7 @@
 #define NODE_POND         0x03
 #define NODE_BROADCAST    0xFF
 #define MY_NODE_ID        NODE_TANK
-#define CONFIG_VERSION    37    // Added web_always_on and WiFi STA credentials
+#define CONFIG_VERSION    38    // Default auto pump mask enabled + multi-node pond support
 
 // StatusPayload flags byte (TX)
 #define STATUS_BIT_AUTO   0x01  // auto mode active
@@ -68,6 +68,15 @@
 #define DEFAULT_PUMP_MIN_COOLDOWN_MS   20000UL  
 #define DEFAULT_TELEMETRY_INTERVAL_MS  30000UL  // 30s heartbeat (immediate TX on state change)
 #define DEFAULT_NETWORK_TIMEOUT_MS     60000UL  
+
+// ─── Smart Auto-Refill Hysteresis ─────────────────────────────────────────────
+#define TANK_REFILL_TRIGGER_LEVEL            1  // Level <= 1 (<= 33% Low/Empty) demands Pond refill
+#define TANK_REFILL_CUTOFF_LEVEL             3  // Level >= 3 (100% Full) cuts off Pond refill
+#define LORA_WATCHDOG_TIMEOUT_MS      600000UL  // 10 minutes without gateway packet triggers warning
+
+// ─── PSRAM In-Memory Telemetry Buffer ─────────────────────────────────────────
+#define PSRAM_HISTORY_CAPACITY            1440  // 24 hours at 1 snapshot per minute
+#define HISTORY_SAMPLE_INTERVAL_MS     60000UL  // 1 minute resolution
 
 // ─── Debounce & Filtration ────────────────────────────────────────────────────
 #define FLOAT_DEBOUNCE_MS               1500UL  // Stable float reading duration to filter water sloshing

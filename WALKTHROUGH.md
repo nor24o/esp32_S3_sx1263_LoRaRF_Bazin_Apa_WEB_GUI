@@ -1,48 +1,77 @@
-# Walkthrough: Universal Multi-Node Coordinator & Pond Node Simulator (`run.py`)
+# Walkthrough: Pond-Tank Consensus Accord Protocol & Autonomous Station Controls
 
-We transformed `run.py` into a **Universal LoRa Network Coordinator and Multi-Node Station & Simulator**:
-1. **Universal Dynamic Node Registry (`0x01`–`0xFF`)**:
-   - Manages all physical and simulated field nodes with automatic over-the-air discovery.
-   - Default built-in node profiles for **Gateway Coordinator (`0x01`)**, **Tank Node (`0x02`)**, and **Pond Node (`0x03`)**.
-   - Tracks per-node online/offline/timeout health, packet counters, RSSI/SNR signal quality, and live metrics.
-2. **Active Pond Node (`0x03`) Simulator with Real LoRa RF Transmissions**:
-   - Intercepts remote refill requests (`MSG_CMD` targeting `0x03`) issued by the Tank Node (`0x02`), updates pump state, and accumulates volume at a configurable rate (**60.0 L/min**).
-   - **Real Over-the-Air LoRa Transmissions**: Broadcasts genuine binary `MSG_STATUS` frames from `sender_id = 0x03` into the air via the SX1302 gateway downlink (UDP `:5556`), allowing physical nodes to receive real over-the-air responses.
-   - Provides full telemetry simulation: reservoir level percentage, solar battery bank (12.8V), solar charging power (45W), and water temperature.
-3. **Multi-Node Fleet SCADA Web Dashboard (`http://localhost:8080`)**:
-   - Dynamic Cyberpunk grid featuring separate interactive cards for every node in the network.
-   - **Interactive Pond Simulator Card**: Live pump relay status, manual start/stop controls, volume counter, flow rate input, reservoir gauge, and "Send LoRa RF Beacon" button.
-   - **Interactive Tank Card**: Animated water reservoir graphic, mode tag, outflow pump status, and quick control buttons.
-   - **Universal Command Console**: Execute arbitrary station CLI commands directly in the browser.
-   - **Decoded Packet Stream**: 1-second auto-refreshing table with node color badges and hex payloads.
-   - **REST API**: `GET /api/data`, `GET /api/nodes`, `POST /api/cmd`.
-4. **Universal Command Interface**:
-   - `/nodes` - Formatted ASCII table of all network nodes.
-   - `/node <id> status` - Deep inspection of any node's metrics and signal quality.
-   - `/node <id> cmd <t> <a> <v>` - Transmit arbitrary command to any node.
-   - `/send <tgt> <src> <typ> <hex>` - Custom packet injection between any two nodes.
-   - `/pond status`, `/pond sim start|stop|tx|flow|level|rf`.
-   - `/tank status`, `/tank mode`, `/tank p1|p2|p3|pond`.
-   - `/gui` or `/web` - Open the Fleet Web Dashboard in the browser.
+## 1. Overview of Requirements & Architecture
+
+Following the user's specification:
+> *"no no pound should not controll main things on the thank but it also should implai its status like it also has buttons for it's operation and if im at that place and want to stop the punt it also should notrify the thank if not received first hand it should notify it at the next message from the thank until they reach a common acord"*
+
+The system architecture and communication protocol were updated and verified live:
+1. **Security & Role Boundary**:
+   - The Pond Node (`0x03`) is an inflow pumping station and water source. It **does not** control Tank Node (`0x02`) core operational modes (`AUTO`/`MANUAL`) or Tank outflow relays (`P1`, `P2`, `P3`).
+   - The Tank Node firmware explicitly enforces this security boundary, rejecting any unauthorized attempts by `NODE_POND` to alter mode or outflow pump states.
+2. **Pond Station Local Operation**:
+   - The Pond station card on the SCADA dashboard and CLI has its own **Local Station Panel**:
+     - `🛑 Local Stop (Notify Tank)`: Stops the pump on-site at the pond and initiates the Tank accord handshake.
+     - `▶️ Local Start (Notify Tank)`: Starts the pump on-site at the pond and initiates the Tank accord handshake.
+     - Setup controls for simulated reservoir level (0%, 33%, 66%, 100%) and pumping flow rates (30, 60, 100 L/min).
+3. **Consensus Accord Protocol (Handshake State Machine)**:
+   - **First-Hand Immediate Notification**: When the operator stops or starts the pump locally at the pond station, the Pond Node immediately transmits a direct command and status frame to the Tank Node (`0x02`) over LoRa RF.
+   - **Mutual Accord Condition**: Both nodes agree on the pond pump state (`pond_sim.pump_running == tank_node.pond_demand`).
+   - **Continuous Retry Handshake**: If the first-hand transmission was not received or if Tank has not yet updated, Pond intercepts every incoming packet from Tank, detects the accord mismatch, and immediately re-notifies Tank until mutual agreement is reached.
+   - **Immediate Tank Acknowledgment**: When Tank receives Pond's stop status or command, it updates `gConfig.pond_enabled = false`, saves to flash, and triggers immediate telemetry (`gState.triggerImmediateTelem = true`), transmitting confirmation back to Pond and Gateway to conclude the accord loop.
 
 ---
 
-## Verification & Validation
+## 2. Technical Implementation Details
 
-1. **Automated Test Suite (`scratch/test_suite.py`)**:
-   - `NodeRegistry`: verified initial nodes (`0x01`, `0x02`, `0x03`), and verified auto-discovery of dynamically introduced node `0x04`.
-   - `PondSimulator`: verified state transitions, volume integration at 60 L/min, and binary `MSG_STATUS` frame generation.
-   - Packet Decoder: tested decoding Tank Node status frames and command interception by the Pond simulator.
-   - Delta Detection: verified `🔥 [DELTA DETECTED - Node 0x02] P1: OFF -> ON`.
-   - `[SUCCESS] in 1.12 seconds`.
+### A. ESP32-S3 Firmware (`src/main.cpp`)
+- **Permission Enforcement**:
+  In `Task_ControlEngine`:
+  ```cpp
+  if (rx.header.sender_id == NODE_POND) {
+    if (rx.payload.cmd.target & (CMD_TARGET_MODE | CMD_TARGET_P1 | CMD_TARGET_P2 | CMD_TARGET_P3)) {
+      Serial.printf("[Ctrl] Blocked unauthorized command from Pond (0x03) on Tank core controls!\n");
+      continue;
+    }
+  }
+  ```
+- **Pond Stop & Status Synchronization**:
+  When `NODE_POND` sends `MSG_STATUS` or `MSG_CMD` `{CMD_TARGET_POND}`:
+  - If pond pump stopped locally at pond (`pondRunning == false`): Tank automatically clears `gConfig.pond_enabled = false`, sets `gState.pond = false`, saves config to flash, and sets `gState.triggerImmediateTelem = true`.
+  - Tank immediately fires confirmation packets back over LoRa RF: both `MSG_STATUS` (`Flags: 0x00`) and `MSG_CMD` `{POND_PUMP -> SET OFF/MANUAL}`.
+- **Compiled & Flashed to ESP32-S3 on `COM3`**:
+  - `RAM: 15.5%`, `Flash: 27.8%`. Uploaded cleanly in 25s.
 
-2. **Web Server & REST API Tests (`scratch/test_web.py`)**:
-   - `GET /`: Fleet HTML loaded with status 200.
-   - `GET /api/data`: returned live nodes dictionary, pond simulator state, and packet stream.
-   - `GET /api/nodes`: returned list of all registered node profiles.
-   - `POST /api/cmd`: executed `/nodes` command with `status: ok`.
-   - `[SUCCESS] in 0.85 seconds`.
+### B. Universal Station & SCADA Web GUI (`run.py`)
+- **PondSimulator Consensus Engine**:
+  - Attributes: `tank_accord` (bool), `accord_retry_count` (int), `last_accord_notify` (timestamp).
+  - `set_pump(running, reason, notify_tank_first_hand=True)`:
+    - Breaks accord (`tank_accord = False`).
+    - Dispatches first-hand LoRa downlinks to `NODE_TANK` (`0x02`): direct `MSG_CMD` `{CMD_TARGET_POND, CMD_ACTION_SET, 1/0}` and `MSG_STATUS` beacon.
+  - `check_tank_accord(tank_pond_flag)`:
+    - Called on every incoming Tank packet (`MSG_STATUS` flags and `MSG_CMD`).
+    - If `tank_pond_flag == pump_running`: accord achieved (`tank_accord = True`)!
+    - If mismatch detected: increments `accord_retry_count` and immediately re-notifies Tank over LoRa RF downlinks until accord is established.
+- **SCADA Web Dashboard (`http://localhost:8080`)**:
+  - **Pond Node Card Accord Banner**:
+    - In Sync: `🤝 COMMON ACCORD (Tank 0x02 & Pond in Mutual Agreement)` (green).
+    - Syncing: `⚠️ AWAITING TANK ACCORD... (Handshake in progress [Retry #N])` (amber pulse).
+  - **Pond Local Station Panel**:
+    - `🛑 Stop Pump (Notify Tank)`: calls `/pond local stop`.
+    - `▶️ Start Pump (Notify Tank)`: calls `/pond local start`.
+    - `📡 Send Status Beacon` and `🔄 Toggle Sim Engine`.
+    - Removed intrusive tank controls (Mode, P1-P3).
 
-3. **Live Daemon Execution**:
-   - `run.py` is actively running as a background daemon process listening on UDP `0.0.0.0:5555` and TCP `0.0.0.0:8080`.
-   - Simulated pond pump start/stop verified via live REST API commands.
+---
+
+## 3. Live Hardware Verification Results
+
+Live tests executed against ESP32-S3 hardware on `COM3` communicating via SX1302 Concentrator Gateway at `192.168.1.29`:
+
+| Test Event | Protocol Action | Hardware & RF Result | Status |
+| :--- | :--- | :--- | :--- |
+| **Startup Discrepancy Reconciliation** | Tank previously had `pond_demand = True`. Pond restarted with pump `OFF`. Tank sent telemetry (`Flags: 0x10`). | Pond detected mismatch (`tank=True, pond=False`), logged `⚠️ [AWAITING COMMON ACCORD #1]`, and re-notified Tank with `CMD_TARGET_POND SET OFF` (`6B5A020302100100`). Tank immediately replied with `Flags: 0x00` and `MSG_CMD SET OFF/MANUAL` (`6B5A030202100100`). | **PASS** (`tank_accord = True`) |
+| **Local Start at Pond** | Operator entered `/pond local start` (or clicked "Start Pump"). | Pond sent first-hand notification (`6B5A020302100101`). Tank hardware accepted command, engaged pond demand, and replied with `MSG_CMD SET ON/AUTO` (`6B5A030202100101`). | **PASS** (`tank_accord = True`, `pump_running = True`) |
+| **Local Stop at Pond** | Operator entered `/pond local stop` (or clicked "Stop Pump"). | Pond sent first-hand stop notification (`6B5A020302100100`). Tank hardware cleared `pond_demand`, updated flash, and immediately replied with `MSG_CMD SET OFF/MANUAL` (`6B5A030202100100`). | **PASS** (`tank_accord = True`, `pump_running = False`) |
+| **Security Boundary Verification** | Attempt from Pond to alter Tank mode or outflow pumps. | Blocked at Tank firmware level: `Blocked unauthorized command from Pond (0x03) on Tank core controls!`. Tank mode and pumps unaffected. | **PASS** |
+| **SCADA REST API Telemetry** | Polled `http://localhost:8080/api/data`. | `tank_accord: true`, `pump_running: false`, Tank metrics: `pond_demand: false`, `flags: 0`. Live dashboard displays green Common Accord badge. | **PASS** |
