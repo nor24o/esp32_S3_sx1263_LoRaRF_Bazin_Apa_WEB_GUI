@@ -16,6 +16,8 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <LittleFS.h>
+#include <ArduinoOTA.h>
+#include <Update.h>
 
 #include "config.h"
 #include "web_assets.h"
@@ -68,6 +70,23 @@ struct LocalConfig {
   uint8_t web_always_on;      // 1 = Web server always active on boot
   char wifi_sta_ssid[33];     // optional home Wi-Fi SSID
   char wifi_sta_pass[65];     // optional home Wi-Fi password
+  // LoRa RF Transceiver Tuning
+  uint32_t lora_freq_hz;
+  int8_t lora_tx_power_dbm;
+  uint8_t lora_sf;
+  uint16_t lora_bw_khz;
+  uint8_t lora_cr;
+  uint8_t lora_ldro;          // 0 = Auto (Symbol >= 16.38ms), 1 = Force ON, 2 = Force OFF
+  uint16_t lora_sync_word;
+  // Reservoir Hydraulic Capacity & Refill Thresholds
+  uint32_t tank_capacity_liters;
+  uint8_t refill_trigger_level;
+  uint8_t refill_cutoff_level;
+  // Protocol network identities
+  uint8_t node_id;
+  uint8_t pond_id;
+  uint8_t gateway_id;
+  uint16_t network_magic;
 };
 
 struct NodeStats {
@@ -117,6 +136,9 @@ struct SystemState {
   bool tankEmptyAlarm = false;
   uint32_t pumpLastOn[3] = {};
   uint32_t pumpLastOff[3] = {};
+  uint8_t pumpOverride[3] = {PUMP_OVERRIDE_AUTO, PUMP_OVERRIDE_AUTO, PUMP_OVERRIDE_AUTO};
+  uint32_t pumpTimedUntil[3] = {};
+  uint8_t activeRule = 3;
 };
 
 struct TelemetryHistoryEntry {
@@ -142,12 +164,73 @@ static SPIClass SPI_2(FSPI);
 static Preferences prefs;
 static CRGB leds[NUM_LEDS];
 
-static SemaphoreHandle_t xStateMutex;
-static QueueHandle_t xRxQueue;
-static QueueHandle_t xTxQueue;
+static SemaphoreHandle_t xStateMutex = nullptr;
+static SemaphoreHandle_t xLogMutex = nullptr;
+static QueueHandle_t xRxQueue = nullptr;
+static QueueHandle_t xTxQueue = nullptr;
 static TaskHandle_t xControlTask = nullptr;
 
 static PumpHysteresis phP1, phP2, phP3;
+
+#if ENABLE_DEBUG_WEB
+static WebServer httpServer(DEBUG_HTTP_PORT);
+static WebSocketsServer wsServer(DEBUG_WS_PORT);
+static DNSServer dnsServer;
+static bool gDebugServerRunning = false;
+static bool gDebugServerWanted = false;
+#endif
+
+// ─── Circular System Event Log Engine ─────────────────────────────────────────
+struct SystemLogEntry {
+  uint32_t timestamp_s;
+  char category[12];
+  char message[110];
+  uint8_t level; // 0=INFO, 1=WARN, 2=ERR, 3=SUCCESS
+};
+
+#define MAX_SYSTEM_LOGS 64
+static SystemLogEntry gSystemLogs[MAX_SYSTEM_LOGS];
+static uint16_t gLogCount = 0;
+static uint16_t gLogHead = 0;
+
+static void logEvent(const char *category, uint8_t level, const char *fmt, ...) {
+  char buf[128];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+
+  const char *lvlStr = (level == 1) ? "WARN" : ((level == 2) ? "ERR" : ((level == 3) ? "OK" : "INFO"));
+  Serial.printf("[%lu][%s][%s] %s\n", (unsigned long)(millis() / 1000), category, lvlStr, buf);
+
+  if (xLogMutex && xSemaphoreTake(xLogMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    uint16_t idx;
+    if (gLogCount < MAX_SYSTEM_LOGS) {
+      idx = (gLogHead + gLogCount) % MAX_SYSTEM_LOGS;
+      gLogCount++;
+    } else {
+      idx = gLogHead;
+      gLogHead = (gLogHead + 1) % MAX_SYSTEM_LOGS;
+    }
+    gSystemLogs[idx].timestamp_s = (uint32_t)(millis() / 1000);
+    strncpy(gSystemLogs[idx].category, category, sizeof(gSystemLogs[idx].category) - 1);
+    gSystemLogs[idx].category[sizeof(gSystemLogs[idx].category) - 1] = '\0';
+    strncpy(gSystemLogs[idx].message, buf, sizeof(gSystemLogs[idx].message) - 1);
+    gSystemLogs[idx].message[sizeof(gSystemLogs[idx].message) - 1] = '\0';
+    gSystemLogs[idx].level = level;
+    xSemaphoreGive(xLogMutex);
+  }
+
+#if ENABLE_DEBUG_WEB
+  if (gDebugServerRunning) {
+    char wsBuf[256];
+    snprintf(wsBuf, sizeof(wsBuf),
+      "{\"type\":\"log_event\",\"ts\":%lu,\"cat\":\"%s\",\"lvl\":%u,\"msg\":\"%s\"}",
+      (unsigned long)(millis() / 1000), category, level, buf);
+    wsServer.broadcastTXT(wsBuf);
+  }
+#endif
+}
 
 // ─── Config / Stats persistence ───────────────────────────────────────────────
 static void resetConfigToDefaults() {
@@ -161,6 +244,25 @@ static void resetConfigToDefaults() {
   gConfig.pump_enabled_auto[2] = true;
   gConfig.debug_mode_enabled = DEFAULT_WEB_ALWAYS_ON;
   gConfig.web_always_on = DEFAULT_WEB_ALWAYS_ON;
+  strncpy(gConfig.wifi_sta_ssid, DEFAULT_WIFI_STA_SSID, sizeof(gConfig.wifi_sta_ssid) - 1);
+  strncpy(gConfig.wifi_sta_pass, DEFAULT_WIFI_STA_PASS, sizeof(gConfig.wifi_sta_pass) - 1);
+
+  gConfig.lora_freq_hz = DEFAULT_LORA_FREQ_HZ;
+  gConfig.lora_tx_power_dbm = DEFAULT_LORA_TX_POWER_DBM;
+  gConfig.lora_sf = DEFAULT_LORA_SF;
+  gConfig.lora_bw_khz = DEFAULT_LORA_BW_KHZ;
+  gConfig.lora_cr = DEFAULT_LORA_CR;
+  gConfig.lora_ldro = DEFAULT_LORA_LDRO;
+  gConfig.lora_sync_word = DEFAULT_LORA_SYNC_WORD;
+ 
+  gConfig.tank_capacity_liters = DEFAULT_TANK_CAPACITY_LITERS;
+  gConfig.refill_trigger_level = DEFAULT_REFILL_TRIGGER_LEVEL;
+  gConfig.refill_cutoff_level = DEFAULT_REFILL_CUTOFF_LEVEL;
+ 
+  gConfig.node_id = DEFAULT_NODE_ID;
+  gConfig.pond_id = DEFAULT_POND_ID;
+  gConfig.gateway_id = DEFAULT_GATEWAY_ID;
+  gConfig.network_magic = DEFAULT_NETWORK_MAGIC;
 }
 
 static bool validateConfig(const LocalConfig &c) {
@@ -172,7 +274,16 @@ static bool validateConfig(const LocalConfig &c) {
          c.telemetry_interval_ms <= CFG_TELEM_MAX_MS &&
          c.boot_auto_mode <= 1 &&
          c.debug_mode_enabled <= 1 &&
-         c.web_always_on <= 1;
+         c.web_always_on <= 1 &&
+         c.lora_freq_hz >= 150000000UL && c.lora_freq_hz <= 960000000UL &&
+         c.lora_tx_power_dbm >= -9 && c.lora_tx_power_dbm <= 22 &&
+         c.lora_sf >= 6 && c.lora_sf <= 12 &&
+         (c.lora_bw_khz == 125 || c.lora_bw_khz == 250 || c.lora_bw_khz == 500) &&
+         c.lora_cr >= 5 && c.lora_cr <= 8 &&
+         c.lora_ldro <= 2 &&
+         c.refill_trigger_level <= 3 &&
+         c.refill_cutoff_level <= 3 &&
+         c.refill_trigger_level < c.refill_cutoff_level;
 }
 
 static void saveConfig(bool force = false) {
@@ -263,8 +374,32 @@ static void setForRx() {
   LoRa.request(SX126X_RX_CONTINUOUS);
 }
 
+static bool isLdroActive() {
+  if (gConfig.lora_ldro == 1) return true;
+  if (gConfig.lora_ldro == 2) return false;
+  // Auto mode: true whenever symbol duration >= 16.0 ms (e.g. SF11/12 at 125kHz, SF12 at 250kHz)
+  uint32_t bw = gConfig.lora_bw_khz ? gConfig.lora_bw_khz : 125;
+  float symLenMs = (float)(1UL << gConfig.lora_sf) / (float)bw;
+  return (symLenMs >= 16.0f);
+}
+
+static bool applyLoRaConfig() {
+  if (!gState.radioOk) return false;
+  uint32_t bwHz = (uint32_t)gConfig.lora_bw_khz * 1000UL;
+  bool ldro = isLdroActive();
+  LoRa.setFrequency(gConfig.lora_freq_hz);
+  LoRa.setTxPower(gConfig.lora_tx_power_dbm, SX126X_TX_POWER_SX1262);
+  LoRa.setLoRaModulation(gConfig.lora_sf, bwHz, gConfig.lora_cr, ldro);
+  LoRa.setSyncWord(gConfig.lora_sync_word);
+  setForRx();
+  logEvent("LORA", 3, "Applied RF: %lu Hz, SF%u, BW%u kHz, CR4/%u, LDRO=%s, %d dBm, Sync 0x%04X",
+           (unsigned long)gConfig.lora_freq_hz, gConfig.lora_sf, gConfig.lora_bw_khz,
+           gConfig.lora_cr, ldro ? "ON" : "OFF", gConfig.lora_tx_power_dbm, gConfig.lora_sync_word);
+  return true;
+}
+
 static void buildStatus(LoRaPacket &pkt) {
-  pkt.header = {MY_NETWORK_MAGIC, NODE_GATEWAY, NODE_TANK, MSG_STATUS};
+  pkt.header = {gConfig.network_magic, gConfig.gateway_id, gConfig.node_id, MSG_STATUS};
   if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     uint8_t allowed_mask = (gState.pumpEnabledAuto[0] ? 1 : 0) |
                            (gState.pumpEnabledAuto[1] ? 2 : 0) |
@@ -290,7 +425,7 @@ static void buildStatus(LoRaPacket &pkt) {
                 (gState.pumpState[0] ? STATUS_BIT_P1 : 0) |
                 (gState.pumpState[1] ? STATUS_BIT_P2 : 0) |
                 (gState.pumpState[2] ? STATUS_BIT_P3 : 0) |
-                (gState.pond ? STATUS_BIT_POND : 0)), 
+                ((gConfig.pond_enabled || gState.pond) ? STATUS_BIT_POND : 0)), 
       gState.waterLevel,
       gState.temperature,
       gState.humidity,
@@ -304,9 +439,16 @@ static void buildStatus(LoRaPacket &pkt) {
 
 // ─── LoRa Manager Task (Core 0, Pri 2) ────────────────────────────────────────
 static void Task_LoRaManager(void *) {
+  uint32_t lastTxEndMs = 0;
   for (;;) {
+    uint32_t now = millis();
+    // Guard time after transmission before next queue transmission (ensures RX continuous listening window)
+    uint32_t guardMs = (gConfig.lora_sf >= 12) ? 1800UL :
+                       (gConfig.lora_sf == 11) ? 1200UL :
+                       (gConfig.lora_sf == 10) ? 800UL : 400UL;
+
     LoRaPacket txPkt;
-    if (xQueueReceive(xTxQueue, &txPkt, 0) == pdTRUE) {
+    if ((now - lastTxEndMs >= guardMs) && (xQueueReceive(xTxQueue, &txPkt, 0) == pdTRUE)) {
       uint8_t payLen = (txPkt.header.msg_type == MSG_STATUS) ? (uint8_t)sizeof(StatusPayload)
                                                              : (uint8_t)sizeof(CmdPayload);
       sx126x_setBufferBaseAddress(0, 0);
@@ -315,12 +457,14 @@ static void Task_LoRaManager(void *) {
       LoRa.write((uint8_t *)&txPkt, sizeof(LoRaHeader) + payLen);
       LoRa.endPacket();
       LoRa.wait();
+      lastTxEndMs = millis();
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
         gState.txFlash = true;
         xSemaphoreGive(xStateMutex);
       }
-      Serial.printf("\n[LoRa TX] type=%u target=0x%02X\n", txPkt.header.msg_type, txPkt.header.target_id);
+      Serial.printf("\n[LoRa TX] type=%u target=0x%02X (Guard=%lums)\n", txPkt.header.msg_type, txPkt.header.target_id, guardMs);
       setForRx();
+      LoRa.purge(LoRa.available());
     }
 
     uint8_t avail = LoRa.available();
@@ -336,8 +480,8 @@ static void Task_LoRaManager(void *) {
       for (int i = 0; i < n; i++) printf("%02X ", p[i]);
       printf("\n");
       
-      if (rxPkt.header.magic == MY_NETWORK_MAGIC &&
-          (rxPkt.header.target_id == NODE_TANK || rxPkt.header.target_id == NODE_BROADCAST)) {
+      if (rxPkt.header.magic == gConfig.network_magic &&
+          (rxPkt.header.target_id == gConfig.node_id || rxPkt.header.target_id == NODE_BROADCAST)) {
         printf("[LoRa RX] Valid packet for this node (target=%u)\n", rxPkt.header.target_id);
 
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
@@ -360,19 +504,17 @@ static void Task_LoRaManager(void *) {
 
 // ─── Debug Web / WebSocket Server (Core 0, Pri 1) ─────────────────────────────
 #if ENABLE_DEBUG_WEB
-static WebServer httpServer(DEBUG_HTTP_PORT);
-static WebSocketsServer wsServer(DEBUG_WS_PORT);
-static DNSServer dnsServer;
-static bool gDebugServerRunning = false;
-static bool gDebugServerWanted = false;
 
 static void broadcastTelemetryWs() {
   if (!gDebugServerRunning) return;
-  char buf[896];
+  char buf[1280];
   uint8_t wl = 0, raw_wl = 0, pcf_raw = 0xFF, ec = 0;
   bool am = false, pond = false, demand = false, pcfOk = false, wlValid = false, radioOk = false;
   bool ps[3] = {}, pea[3] = {};
   uint32_t lastOn[3] = {}, lastOff[3] = {};
+  uint8_t pOverride[3] = {};
+  uint32_t pTimedUntil[3] = {};
+  uint8_t activeRule = 3;
   int16_t rssi = 0; int8_t snr = 0;
   int16_t temp = 0; uint8_t hum = 0;
   
@@ -394,14 +536,17 @@ static void broadcastTelemetryWs() {
       pea[i] = gState.pumpEnabledAuto[i];
       lastOn[i] = gState.pumpLastOn[i];
       lastOff[i] = gState.pumpLastOff[i];
+      pOverride[i] = gState.pumpOverride[i];
+      pTimedUntil[i] = gState.pumpTimedUntil[i];
     }
+    activeRule = gState.activeRule;
     rssi = gState.lastRssi;
     snr = gState.lastSnr;
     xSemaphoreGive(xStateMutex);
   }
 
   uint32_t now = millis();
-  uint32_t runLeft[3] = {}, cdLeft[3] = {};
+  uint32_t runLeft[3] = {}, cdLeft[3] = {}, timedLeft[3] = {};
   for (int i = 0; i < 3; i++) {
     if (ps[i] && lastOn[i] > 0) {
       uint32_t el = now - lastOn[i];
@@ -409,6 +554,9 @@ static void broadcastTelemetryWs() {
     } else if (!ps[i] && lastOff[i] > 0) {
       uint32_t el = now - lastOff[i];
       if (el < gConfig.pump_min_cooldown_ms) cdLeft[i] = (gConfig.pump_min_cooldown_ms - el) / 1000;
+    }
+    if (pOverride[i] == PUMP_OVERRIDE_FORCE_ON && pTimedUntil[i] > now) {
+      timedLeft[i] = (pTimedUntil[i] - now) / 1000;
     }
   }
 
@@ -432,16 +580,23 @@ static void broadcastTelemetryWs() {
     "\"pcf_raw\":%u,\"pcf_ok\":%d,\"floats\":[%u,%u,%u],\"buttons\":[%u,%u,%u,%u,%u],"
     "\"pumps\":[%d,%d,%d],\"pins\":[%d,%d,%d],\"auto_mask\":[%d,%d,%d],"
     "\"run_left\":[%lu,%lu,%lu],\"cd_left\":[%lu,%lu,%lu],"
+    "\"overrides\":[%u,%u,%u],\"timed_left\":[%lu,%lu,%lu],\"active_rule\":%u,"
     "\"rt_stats\":[%lu,%lu,%lu],\"pond\":%d,\"demand\":%d,\"err\":%u,\"err_str\":\"%s\","
     "\"temp\":%.1f,\"hum\":%u,\"rssi\":%d,\"snr\":%d,\"radio_ok\":%d,"
     "\"heap\":%lu,\"min_heap\":%lu,\"cpu_mhz\":%u,\"uptime\":%lu,\"boots\":%lu,"
     "\"sta\":%d,\"sta_ip\":\"%s\",\"sta_rssi\":%d,\"ap_clients\":%u,"
-    "\"cfg_runtime\":%lu,\"cfg_cooldown\":%lu,\"cfg_telem\":%lu,\"always_on\":%u}",
+    "\"cfg_runtime\":%lu,\"cfg_cooldown\":%lu,\"cfg_telem\":%lu,\"always_on\":%u,"
+    "\"tank_capacity\":%lu,\"refill_trigger\":%u,\"refill_cutoff\":%u,"
+    "\"lora_freq\":%lu,\"lora_power\":%d,\"lora_sf\":%u,\"lora_bw\":%u,\"lora_cr\":%u,"
+    "\"lora_ldro\":%u,\"ldro_active\":%u}",
     wl, raw_wl, wlValid ? 1 : 0, am ? "AUTO" : "MAN",
     pcf_raw, pcfOk ? 1 : 0, f1, f2, f3, bMode, bP1, bP2, bP3, bPond,
     ps[0], ps[1], ps[2], RELAY_P1, RELAY_P2, RELAY_P3, pea[0], pea[1], pea[2],
     (unsigned long)runLeft[0], (unsigned long)runLeft[1], (unsigned long)runLeft[2],
     (unsigned long)cdLeft[0], (unsigned long)cdLeft[1], (unsigned long)cdLeft[2],
+    pOverride[0], pOverride[1], pOverride[2],
+    (unsigned long)timedLeft[0], (unsigned long)timedLeft[1], (unsigned long)timedLeft[2],
+    activeRule,
     (unsigned long)gStats.runtime_p1_s, (unsigned long)gStats.runtime_p2_s, (unsigned long)gStats.runtime_p3_s,
     pond ? 1 : 0, demand ? 1 : 0, ec, errStr,
     temp / 10.0, hum, rssi, snr, radioOk ? 1 : 0,
@@ -454,17 +609,48 @@ static void broadcastTelemetryWs() {
     (unsigned long)gConfig.pump_min_runtime_ms,
     (unsigned long)gConfig.pump_min_cooldown_ms,
     (unsigned long)gConfig.telemetry_interval_ms,
-    gConfig.web_always_on
+    gConfig.web_always_on,
+    (unsigned long)gConfig.tank_capacity_liters,
+    gConfig.refill_trigger_level,
+    gConfig.refill_cutoff_level,
+    (unsigned long)gConfig.lora_freq_hz,
+    gConfig.lora_tx_power_dbm,
+    gConfig.lora_sf,
+    gConfig.lora_bw_khz,
+    gConfig.lora_cr,
+    gConfig.lora_ldro,
+    isLdroActive() ? 1 : 0
   );
   wsServer.broadcastTXT(buf);
 }
 
+static void sendLogsWs(uint8_t num) {
+  if (!xLogMutex) return;
+  if (xSemaphoreTake(xLogMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    for (uint16_t i = 0; i < gLogCount; i++) {
+      uint16_t idx = (gLogHead + i) % MAX_SYSTEM_LOGS;
+      char wsBuf[256];
+      snprintf(wsBuf, sizeof(wsBuf),
+        "{\"type\":\"log_event\",\"ts\":%lu,\"cat\":\"%s\",\"lvl\":%u,\"msg\":\"%s\"}",
+        (unsigned long)gSystemLogs[idx].timestamp_s,
+        gSystemLogs[idx].category,
+        gSystemLogs[idx].level,
+        gSystemLogs[idx].message);
+      wsServer.sendTXT(num, wsBuf);
+    }
+    xSemaphoreGive(xLogMutex);
+  }
+}
+
 static void sendConfigWs(uint8_t num) {
-  char buf[384];
+  char buf[512];
   snprintf(buf, sizeof(buf),
     "{\"type\":\"config\",\"runtime\":%lu,\"cooldown\":%lu,\"telem\":%lu,"
     "\"boot_auto\":%u,\"debug\":%u,\"always_on\":%u,\"sta_ssid\":\"%s\","
-    "\"ap_ip\":\"%s\",\"sta_ip\":\"%s\"}",
+    "\"ap_ip\":\"%s\",\"sta_ip\":\"%s\","
+    "\"lora_freq\":%lu,\"lora_power\":%d,\"lora_sf\":%u,\"lora_bw\":%u,"
+    "\"lora_cr\":%u,\"lora_sync\":\"0x%04X\",\"lora_ldro\":%u,\"ldro_active\":%u,"
+    "\"tank_capacity\":%lu,\"refill_trigger\":%u,\"refill_cutoff\":%u}",
     (unsigned long)gConfig.pump_min_runtime_ms,
     (unsigned long)gConfig.pump_min_cooldown_ms,
     (unsigned long)gConfig.telemetry_interval_ms,
@@ -473,7 +659,18 @@ static void sendConfigWs(uint8_t num) {
     gConfig.web_always_on,
     gConfig.wifi_sta_ssid,
     WiFi.softAPIP().toString().c_str(),
-    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "Disconnected"
+    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "Disconnected",
+    (unsigned long)gConfig.lora_freq_hz,
+    gConfig.lora_tx_power_dbm,
+    gConfig.lora_sf,
+    gConfig.lora_bw_khz,
+    gConfig.lora_cr,
+    gConfig.lora_sync_word,
+    gConfig.lora_ldro,
+    isLdroActive() ? 1 : 0,
+    (unsigned long)gConfig.tank_capacity_liters,
+    gConfig.refill_trigger_level,
+    gConfig.refill_cutoff_level
   );
   wsServer.sendTXT(num, buf);
 }
@@ -489,6 +686,16 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
     String msg = String((char *)payload);
     if (msg.indexOf("\"cmd\":\"get_config\"") >= 0) {
       sendConfigWs(num);
+    } else if (msg.indexOf("\"cmd\":\"get_logs\"") >= 0) {
+      sendLogsWs(num);
+    } else if (msg.indexOf("\"cmd\":\"clear_logs\"") >= 0) {
+      if (xLogMutex && xSemaphoreTake(xLogMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gLogCount = 0;
+        gLogHead = 0;
+        xSemaphoreGive(xLogMutex);
+      }
+      logEvent("SYS", 0, "System logs cleared by operator");
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Event Logs Cleared!\",\"is_err\":false}");
     } else if (msg.indexOf("\"cmd\":\"mode\"") >= 0) {
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         gState.btnMode_edge = true;
@@ -512,6 +719,93 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
           xSemaphoreGive(xStateMutex);
         }
         if (xControlTask) xTaskNotifyGive(xControlTask);
+      }
+    } else if (msg.indexOf("\"cmd\":\"set_pump_override\"") >= 0) {
+      int idIdx = msg.indexOf("\"id\":");
+      int mIdx = msg.indexOf("\"mode\":");
+      int dIdx = msg.indexOf("\"duration\":");
+      if (idIdx >= 0 && mIdx >= 0) {
+        int pId = msg.substring(idIdx + 5).toInt();
+        String mStr = msg.substring(mIdx + 7);
+        int quoteStart = mStr.indexOf("\"");
+        if (quoteStart >= 0) {
+          int quoteEnd = mStr.indexOf("\"", quoteStart + 1);
+          if (quoteEnd > quoteStart) mStr = mStr.substring(quoteStart + 1, quoteEnd);
+        }
+        uint32_t durMin = 0;
+        if (dIdx >= 0) durMin = msg.substring(dIdx + 11).toInt();
+
+        if (pId >= 1 && pId <= 3) {
+          int idx = pId - 1;
+          uint32_t nowMs = millis();
+          PumpHysteresis *phArr[3] = {&phP1, &phP2, &phP3};
+
+          if (mStr == "FORCE_ON") {
+            uint8_t wl = 0;
+            bool wlValid = false;
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+              wl = gState.waterLevel;
+              wlValid = gState.waterLevelValid;
+              xSemaphoreGive(xStateMutex);
+            }
+            if (wlValid && wl == 0) {
+              char toast[128];
+              snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"Cannot start P%d: Tank is EMPTY (Cavitation Protection)\",\"is_err\":true}", pId);
+              wsServer.sendTXT(num, toast);
+            } else if (!canChangePumpState(*phArr[idx], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+              uint32_t el = (phArr[idx]->lastOffTime > 0) ? (nowMs - phArr[idx]->lastOffTime) : 0;
+              uint32_t cdRem = (el < gConfig.pump_min_cooldown_ms) ? (gConfig.pump_min_cooldown_ms - el) / 1000 : 0;
+              char toast[128];
+              snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"Cannot start P%d: Cooldown active (%lus left)\",\"is_err\":true}", pId, (unsigned long)cdRem);
+              wsServer.sendTXT(num, toast);
+            } else {
+              if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                gState.pumpOverride[idx] = PUMP_OVERRIDE_FORCE_ON;
+                gState.pumpTimedUntil[idx] = (durMin > 0) ? (nowMs + durMin * 60000UL) : 0;
+                gState.triggerImmediateTelem = true;
+                xSemaphoreGive(xStateMutex);
+              }
+              if (xControlTask) xTaskNotifyGive(xControlTask);
+              char toast[160];
+              if (durMin > 0) {
+                snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"P%d Forced ON (%lu min timed run)\",\"is_err\":false}", pId, (unsigned long)durMin);
+              } else {
+                snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"P%d Forced ON (Manual Override Active)\",\"is_err\":false}", pId);
+              }
+              wsServer.sendTXT(num, toast);
+            }
+          } else if (mStr == "FORCE_OFF") {
+            if (!canChangePumpState(*phArr[idx], false, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+              uint32_t el = (phArr[idx]->lastOnTime > 0) ? (nowMs - phArr[idx]->lastOnTime) : 0;
+              uint32_t runRem = (el < gConfig.pump_min_runtime_ms) ? (gConfig.pump_min_runtime_ms - el) / 1000 : 0;
+              char toast[128];
+              snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"Cannot stop P%d: Min runtime active (%lus left)\",\"is_err\":true}", pId, (unsigned long)runRem);
+              wsServer.sendTXT(num, toast);
+            } else {
+              if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                gState.pumpOverride[idx] = PUMP_OVERRIDE_FORCE_OFF;
+                gState.pumpTimedUntil[idx] = 0;
+                gState.triggerImmediateTelem = true;
+                xSemaphoreGive(xStateMutex);
+              }
+              if (xControlTask) xTaskNotifyGive(xControlTask);
+              char toast[128];
+              snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"P%d Forced OFF (Locked Out)\",\"is_err\":false}", pId);
+              wsServer.sendTXT(num, toast);
+            }
+          } else { // "AUTO"
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+              gState.pumpOverride[idx] = PUMP_OVERRIDE_AUTO;
+              gState.pumpTimedUntil[idx] = 0;
+              gState.triggerImmediateTelem = true;
+              xSemaphoreGive(xStateMutex);
+            }
+            if (xControlTask) xTaskNotifyGive(xControlTask);
+            char toast[128];
+            snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"P%d Returned to AUTO Control\",\"is_err\":false}", pId);
+            wsServer.sendTXT(num, toast);
+          }
+        }
       }
     } else if (msg.indexOf("\"cmd\":\"set_auto_mask\"") >= 0) {
       int mIdx = msg.indexOf("\"mask\":[");
@@ -564,6 +858,74 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
       saveConfig(true);
       wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Config Saved to Flash!\",\"is_err\":false}");
       sendConfigWs(num);
+    } else if (msg.indexOf("\"cmd\":\"set_lora_config\"") >= 0) {
+      int fIdx = msg.indexOf("\"freq\":");
+      int pIdx = msg.indexOf("\"power\":");
+      int sfIdx = msg.indexOf("\"sf\":");
+      int bwIdx = msg.indexOf("\"bw\":");
+      int crIdx = msg.indexOf("\"cr\":");
+      int ldIdx = msg.indexOf("\"ldro\":");
+      int syIdx = msg.indexOf("\"sync\":");
+      if (fIdx >= 0) {
+        uint32_t f = msg.substring(fIdx + 7).toInt();
+        if (f >= 150000000UL && f <= 960000000UL) gConfig.lora_freq_hz = f;
+      }
+      if (pIdx >= 0) {
+        int8_t p = msg.substring(pIdx + 8).toInt();
+        if (p >= -9 && p <= 22) gConfig.lora_tx_power_dbm = p;
+      }
+      if (sfIdx >= 0) {
+        uint8_t sf = msg.substring(sfIdx + 5).toInt();
+        if (sf >= 6 && sf <= 12) gConfig.lora_sf = sf;
+      }
+      if (bwIdx >= 0) {
+        uint16_t bw = msg.substring(bwIdx + 5).toInt();
+        if (bw == 125 || bw == 250 || bw == 500) gConfig.lora_bw_khz = bw;
+      }
+      if (crIdx >= 0) {
+        uint8_t cr = msg.substring(crIdx + 5).toInt();
+        if (cr >= 5 && cr <= 8) gConfig.lora_cr = cr;
+      }
+      if (ldIdx >= 0) {
+        uint8_t ld = msg.substring(ldIdx + 7).toInt();
+        if (ld <= 2) gConfig.lora_ldro = ld;
+      }
+      if (syIdx >= 0) {
+        int sQuote = msg.indexOf("\"", syIdx + 7);
+        if (sQuote >= 0) {
+          int sEnd = msg.indexOf("\"", sQuote + 1);
+          if (sEnd > sQuote) {
+            String sVal = msg.substring(sQuote + 1, sEnd);
+            uint16_t sy = (uint16_t)strtoul(sVal.c_str(), NULL, 16);
+            if (sy != 0) gConfig.lora_sync_word = sy;
+          }
+        }
+      }
+      saveConfig(true);
+      applyLoRaConfig();
+      sendConfigWs(num);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"LoRa RF Config Applied & Saved!\",\"is_err\":false}");
+    } else if (msg.indexOf("\"cmd\":\"set_hydraulic_config\"") >= 0) {
+      int cIdx = msg.indexOf("\"capacity\":");
+      int trIdx = msg.indexOf("\"trigger\":");
+      int ctIdx = msg.indexOf("\"cutoff\":");
+      if (cIdx >= 0) {
+        uint32_t c = msg.substring(cIdx + 11).toInt();
+        if (c >= 100 && c <= 1000000UL) gConfig.tank_capacity_liters = c;
+      }
+      if (trIdx >= 0) {
+        uint8_t tr = msg.substring(trIdx + 10).toInt();
+        if (tr <= 3) gConfig.refill_trigger_level = tr;
+      }
+      if (ctIdx >= 0) {
+        uint8_t ct = msg.substring(ctIdx + 9).toInt();
+        if (ct <= 3 && ct > gConfig.refill_trigger_level) gConfig.refill_cutoff_level = ct;
+      }
+      saveConfig(true);
+      sendConfigWs(num);
+      logEvent("HYDR", 3, "Updated capacity: %lu L, Refill trigger: L%u, Cutoff: L%u",
+               (unsigned long)gConfig.tank_capacity_liters, gConfig.refill_trigger_level, gConfig.refill_cutoff_level);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Hydraulic Parameters Saved!\",\"is_err\":false}");
     } else if (msg.indexOf("\"cmd\":\"set_wifi\"") >= 0) {
       int sIdx = msg.indexOf("\"ssid\":\"");
       int pIdx = msg.indexOf("\"pass\":\"");
@@ -599,6 +961,7 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
     } else if (msg.indexOf("\"cmd\":\"defaults\"") >= 0) {
       resetConfigToDefaults();
       saveConfig(true);
+      applyLoRaConfig();
       sendConfigWs(num);
       wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Defaults Restored!\",\"is_err\":false}");
     } else if (msg.indexOf("\"cmd\":\"reboot\"") >= 0) {
@@ -611,6 +974,31 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
   }
 }
 
+static void setupOTA() {
+  ArduinoOTA.setPort(3232);
+  ArduinoOTA.setHostname("tanknode");
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else {
+      type = "filesystem";
+    }
+    logEvent("OTA", 1, "ArduinoOTA flashing started: %s", type.c_str());
+  });
+  ArduinoOTA.onEnd([]() {
+    logEvent("OTA", 3, "ArduinoOTA flashing finished successfully. Restarting...");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    // Keep progress clean
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    logEvent("OTA", 2, "ArduinoOTA error code: %u", error);
+  });
+  ArduinoOTA.begin();
+  logEvent("OTA", 3, "ArduinoOTA server active on port 3232");
+}
+
 static void startDebugWeb() {
   if (gDebugServerRunning) return;
   LittleFS.begin(true);
@@ -618,7 +1006,7 @@ static void startDebugWeb() {
   if (strlen(gConfig.wifi_sta_ssid) > 0) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(gConfig.wifi_sta_ssid, gConfig.wifi_sta_pass);
-    Serial.printf("\n[DebugWeb] Connecting to Home Wi-Fi SSID '%s'...\n", gConfig.wifi_sta_ssid);
+    logEvent("WIFI", 0, "Connecting to Home Wi-Fi SSID '%s'...", gConfig.wifi_sta_ssid);
   } else {
     WiFi.mode(WIFI_AP);
   }
@@ -628,7 +1016,7 @@ static void startDebugWeb() {
 
   if (MDNS.begin(MDNS_HOSTNAME)) {
     MDNS.addService("http", "tcp", 80);
-    Serial.printf("[DebugWeb] mDNS active: http://%s.local\n", MDNS_HOSTNAME);
+    logEvent("WIFI", 3, "mDNS active: http://%s.local", MDNS_HOSTNAME);
   }
 
   httpServer.on("/", HTTP_GET, []() {
@@ -678,6 +1066,61 @@ static void startDebugWeb() {
     httpServer.send(200, "application/json", buf);
   });
 
+  // Web OTA: Update firmware via web browser
+  httpServer.on("/update", HTTP_GET, []() {
+    httpServer.sendHeader("Connection", "close");
+    httpServer.send(200, "text/html",
+      "<!DOCTYPE html><html><head><meta charset='utf-8'><title>TankNode Firmware OTA</title>"
+      "<style>body{font-family:sans-serif;background:#050811;color:#f8fafc;padding:30px;text-align:center}"
+      ".card{background:rgba(13,22,40,0.95);max-width:480px;margin:40px auto;padding:28px;border-radius:14px;border:1px solid rgba(0,240,255,0.3);box-shadow:0 8px 32px rgba(0,0,0,0.8)}"
+      "h2{color:#00f0ff;margin-bottom:12px;font-size:1.3rem}"
+      "p{color:#94a3b8;font-size:0.85rem;margin-bottom:20px}"
+      "input[type=file]{margin:16px 0;padding:12px;background:#0b1120;color:#94a3b8;border-radius:8px;border:1px solid #1e293b;width:100%}"
+      "input[type=submit]{background:linear-gradient(135deg,#00f0ff,#10b981);color:#050811;font-weight:700;border:none;padding:12px 20px;border-radius:8px;cursor:pointer;width:100%;font-size:0.95rem}"
+      ".back{display:inline-block;margin-top:16px;color:#00f0ff;text-decoration:none;font-size:0.8rem}"
+      "</style></head><body><div class='card'>"
+      "<h2>Tank Node Wireless Flashing</h2>"
+      "<p>Select compiled <code>firmware.bin</code> to flash over Wi-Fi without UART cable.</p>"
+      "<form method='POST' action='/update' enctype='multipart/form-data'>"
+      "<input type='file' name='update' accept='.bin' required><br>"
+      "<input type='submit' value='Flash Firmware Now'>"
+      "</form><a href='/' class='back'>&larr; Return to Dashboard</a></div></body></html>");
+  });
+
+  httpServer.on("/update", HTTP_POST, []() {
+    httpServer.sendHeader("Connection", "close");
+    if (Update.hasError()) {
+      logEvent("OTA", 2, "Web OTA Update failed");
+      httpServer.send(500, "text/plain", "Web OTA Update Failed");
+    } else {
+      logEvent("OTA", 3, "Web OTA Update successful. Rebooting...");
+      httpServer.send(200, "text/html",
+        "<!DOCTYPE html><html><body style='background:#050811;color:#00f0ff;text-align:center;padding:50px;font-family:sans-serif'>"
+        "<h2>Update Successful!</h2><p style='color:#94a3b8'>Device is rebooting into the new firmware... Redirecting in 10 seconds.</p>"
+        "<script>setTimeout(()=>{window.location.href='/';}, 10000);</script></body></html>");
+      vTaskDelay(pdMS_TO_TICKS(600));
+      esp_restart();
+    }
+  }, []() {
+    HTTPUpload& upload = httpServer.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      logEvent("OTA", 1, "Web OTA upload starting: %s", upload.filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) {
+        logEvent("OTA", 3, "Web OTA write completed (%u bytes)", upload.totalSize);
+      } else {
+        Update.printError(Serial);
+      }
+    }
+  });
+
   httpServer.onNotFound([]() {
     httpServer.sendHeader("Location", "/", true);
     httpServer.send(302, "text/plain", "");
@@ -686,6 +1129,8 @@ static void startDebugWeb() {
   httpServer.begin();
   wsServer.begin();
   wsServer.onEvent(onWebSocketEvent);
+
+  setupOTA();
 
   gDebugServerRunning = true;
   Serial.printf("\n[DebugWeb] Hotspot online! SSID='%s' Pass='%s' IP=%s\n",
@@ -714,6 +1159,7 @@ static void Task_DebugWebServer(void *) {
     }
 
     if (gDebugServerRunning) {
+      ArduinoOTA.handle();
       dnsServer.processNextRequest();
       httpServer.handleClient();
       wsServer.loop();
@@ -873,6 +1319,7 @@ static void Task_ControlEngine(void *) {
 
   // Persistent tank dual-threshold charge latch (Pond Pump Driver)
   static bool systemDemandOn = gConfig.last_demand_state;
+  static bool pondManualOverride = false;
 
   for (;;) {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CTRL_TICK_MS));
@@ -896,14 +1343,59 @@ static void Task_ControlEngine(void *) {
       xSemaphoreGive(xStateMutex);
     }
 
-    // ── AUTOMATIC TANK CHARGING STATE LATCH (Remote Pond Controller) ──
-    if (waterLevelValid) {
-      if (waterLevel == 0 && !systemDemandOn) {
+    // ── AUTOMATIC TANK CHARGING HYSTERESIS (Remote Pond Controller) ──
+    if (autoMode && waterLevelValid) {
+      // Auto refill starts when water level drops to or below trigger level
+      if (waterLevel <= gConfig.refill_trigger_level && !systemDemandOn) {
         systemDemandOn = true;
-        Serial.println("\n[Ctrl][Auto] Tank dry (WL=0) -> Pond Charging Latch START");
-      } else if (waterLevel >= 3 && systemDemandOn) {
+        gConfig.pond_enabled = true;
+        pondManualOverride = false; // Normal automated cycle
+        saveConfig();
+        logEvent("HYDR", 1, "Water low (%u/3 <= L%u) -> Auto Refill Demand ON", waterLevel, gConfig.refill_trigger_level);
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+          gState.triggerImmediateTelem = true;
+          xSemaphoreGive(xStateMutex);
+        }
+      } else if (systemDemandOn) {
+        if (pondManualOverride) {
+          // Operator manual boost in AUTO mode: ONLY cut off if reservoir is 100% full (waterLevel >= 3) to prevent overflow
+          if (waterLevel >= 3) {
+            systemDemandOn = false;
+            gConfig.pond_enabled = false;
+            pondManualOverride = false;
+            saveConfig();
+            logEvent("HYDR", 3, "Water full (3/3) -> Manual Pond Boost Safeguard Cutoff OFF");
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+              gState.triggerImmediateTelem = true;
+              xSemaphoreGive(xStateMutex);
+            }
+          }
+        } else {
+          // Standard auto refill cycle: cutoff at configured level
+          if (waterLevel >= gConfig.refill_cutoff_level) {
+            systemDemandOn = false;
+            gConfig.pond_enabled = false;
+            saveConfig();
+            logEvent("HYDR", 3, "Water full (%u/3 >= L%u) -> Auto Refill Demand OFF", waterLevel, gConfig.refill_cutoff_level);
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+              gState.triggerImmediateTelem = true;
+              xSemaphoreGive(xStateMutex);
+            }
+          }
+        }
+      }
+    } else if (!autoMode && waterLevelValid) {
+      // MANUAL MODE overflow safeguard: if tank reaches 100% full (3/3), safely cut off refill
+      if (gConfig.pond_enabled && waterLevel >= 3) {
+        gConfig.pond_enabled = false;
         systemDemandOn = false;
-        Serial.println("\n[Ctrl][Auto] Tank full (WL=3) -> Pond Charging Latch STOP");
+        pondManualOverride = false;
+        saveConfig();
+        logEvent("HYDR", 3, "Water full (3/3) -> Manual Mode Overflow Safeguard Cutoff OFF");
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+          gState.triggerImmediateTelem = true;
+          xSemaphoreGive(xStateMutex);
+        }
       }
     }
 
@@ -913,7 +1405,7 @@ static void Task_ControlEngine(void *) {
       saveConfig();
     }
 
-    // In automatic mode, the pond output tracking state perfectly mirrors the charging latch
+    // In automatic mode, pond enabled mirrors system demand latch
     if (autoMode) {
       gConfig.pond_enabled = systemDemandOn;
     }
@@ -956,27 +1448,29 @@ static void Task_ControlEngine(void *) {
     }
 
     if (bPond) {
-      if (!autoMode) { // Direct manual control over pond pump allowed only in Manual Mode
-        gConfig.pond_enabled = !gConfig.pond_enabled;
-        saveConfig();
-        Serial.printf("\n[Ctrl] Manual Pond Request -> %s (Saved)\n", gConfig.pond_enabled ? "ON" : "OFF");
-        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-          gState.triggerImmediateTelem = true;
-          xSemaphoreGive(xStateMutex);
-        }
-      } else {
-        Serial.println("\n[Ctrl] Pond toggle ignored. Handled automatically in AUTO mode.");
+      bool newPond = !gConfig.pond_enabled;
+      gConfig.pond_enabled = newPond;
+      systemDemandOn = newPond;
+      pondManualOverride = newPond;
+      saveConfig();
+      Serial.printf("\n[Ctrl] %s Pond Request -> %s (Saved, Override=%d)\n", autoMode ? "Auto Override" : "Manual", gConfig.pond_enabled ? "ON" : "OFF", pondManualOverride);
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        gState.demandActive = gConfig.pond_enabled;
+        gState.triggerImmediateTelem = true;
+        xSemaphoreGive(xStateMutex);
       }
     }
 
     LoRaPacket rx;
     while (xQueueReceive(xRxQueue, &rx, 0) == pdTRUE) {
-      if (rx.header.sender_id != NODE_GATEWAY && rx.header.sender_id != NODE_POND) continue;
+      if (rx.header.sender_id != gConfig.gateway_id && rx.header.sender_id != gConfig.pond_id) continue;
 
-      if (rx.header.sender_id == NODE_GATEWAY) {
+      if (rx.header.sender_id == gConfig.gateway_id || rx.header.sender_id == gConfig.pond_id) {
         lastGwMs = now;
         gwSeen = true;
-      } else if (rx.header.sender_id == NODE_POND && rx.header.msg_type == MSG_STATUS) {
+      }
+      
+      if (rx.header.sender_id == gConfig.pond_id && rx.header.msg_type == MSG_STATUS) {
         bool pondRunning = bool(rx.payload.status.flags & STATUS_BIT_POND);
         bool changed = false;
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
@@ -984,18 +1478,12 @@ static void Task_ControlEngine(void *) {
             gState.pond = pondRunning;
             changed = true;
           }
-          // If pond pump was stopped locally at the pond, synchronize Tank config so demand stops
-          if (!pondRunning && gConfig.pond_enabled) {
-            gConfig.pond_enabled = false;
-            saveConfig();
-            changed = true;
-          }
           if (changed) {
             gState.triggerImmediateTelem = true; // Instantly broadcast back to reach mutual accord!
           }
           xSemaphoreGive(xStateMutex);
         }
-        Serial.printf("\n[Ctrl] Pond Node 0x03 Status over LoRa -> Pump %s (Accord telem triggered: %s)\n", 
+        Serial.printf("\n[Ctrl] Pond Node 0x03 Status over LoRa -> Pump %s (Accord telem: %s)\n", 
                       pondRunning ? "RUNNING" : "STOPPED", changed ? "YES" : "NO");
       }
 
@@ -1005,13 +1493,13 @@ static void Task_ControlEngine(void *) {
         uint8_t value = rx.payload.cmd.value;
         bool setVal = (action == CMD_ACTION_SET);
         Serial.printf("\n[Ctrl] CMD from 0x%02X (%s) -> target=0x%02X action=%u value=%u\n", 
-                      rx.header.sender_id, (rx.header.sender_id == NODE_POND ? "POND" : (rx.header.sender_id == NODE_GATEWAY ? "GW" : "NODE")),
+                      rx.header.sender_id, (rx.header.sender_id == gConfig.pond_id ? "POND" : (rx.header.sender_id == gConfig.gateway_id ? "GW" : "NODE")),
                       target, action, value);
 
-        // Security boundary: Pond (0x03) cannot alter Tank Mode (Auto/Manual) or Outflow Pumps (P1-P3)!
-        if (rx.header.sender_id == NODE_POND) {
+        // Security boundary: Pond cannot alter Tank Mode (Auto/Manual) or Outflow Pumps (P1-P3)!
+        if (rx.header.sender_id == gConfig.pond_id) {
           if (target & (CMD_TARGET_MODE | CMD_TARGET_P1 | CMD_TARGET_P2 | CMD_TARGET_P3)) {
-            Serial.printf("[Ctrl] Blocked unauthorized command from Pond (0x03) on Tank core controls!\n");
+            Serial.printf("[Ctrl] Blocked unauthorized command from Pond on Tank core controls!\n");
             continue;
           }
         }
@@ -1029,14 +1517,15 @@ static void Task_ControlEngine(void *) {
         }
         
         if (target & CMD_TARGET_POND) {
-          // If stopped from Pond or GW, update state and trigger immediate confirmation telemetry
           bool newPond = setVal ? (bool)value : !gConfig.pond_enabled;
           if (gConfig.pond_enabled != newPond) {
             gConfig.pond_enabled = newPond;
+            systemDemandOn = newPond;
+            pondManualOverride = newPond;
             saveConfig();
-            Serial.printf("[Ctrl] Remote Pond Switch Command -> %s\n", gConfig.pond_enabled ? "ON" : "OFF");
+            Serial.printf("[Ctrl] Remote Pond Switch Command -> %s (Override=%d)\n", gConfig.pond_enabled ? "ON" : "OFF", pondManualOverride);
             if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-              gState.pond = newPond;
+              gState.demandActive = newPond;
               gState.triggerImmediateTelem = true;
               xSemaphoreGive(xStateMutex);
             }
@@ -1130,61 +1619,90 @@ static void Task_ControlEngine(void *) {
       }
     }
 
-    // ── FIXED: PARALLEL IRRIGATION AUTOMATIC CONTROL ENGINE WITH ANTI-CHATTER ───
-    if (autoMode) {
-      bool allowed[3] = {true, true, true};
-      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-        allowed[0] = gState.pumpEnabledAuto[0];
-        allowed[1] = gState.pumpEnabledAuto[1];
-        allowed[2] = gState.pumpEnabledAuto[2];
-        xSemaphoreGive(xStateMutex);
-      }
-
-      // Outflow pumps are parallel: they run if water is available anywhere inside the tank (WL > 0)
-      bool waterAvailable = (waterLevelValid && waterLevel > 0);
-      bool emergencyDry = (waterLevelValid && waterLevel == 0);
-
-      // ── SMART AUTO-REFILL HYSTERESIS ───────────────────────────────────────
-      // If water drops to LOW/EMPTY (<= 1/3) -> automatically demand refill from Pond
-      // If water reaches FULL (>= 3/3) -> automatically shut off refill demand
-      if (waterLevelValid) {
-        if (waterLevel <= TANK_REFILL_TRIGGER_LEVEL && !gConfig.pond_enabled) {
-          gConfig.pond_enabled = true;
-          saveConfig();
-          Serial.printf("\n[AutoRefill] Tank water LOW (%u/3) -> Pond Refill Demand ON\n", waterLevel);
-          if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            gState.triggerImmediateTelem = true;
-            xSemaphoreGive(xStateMutex);
-          }
-        } else if (waterLevel >= TANK_REFILL_CUTOFF_LEVEL && gConfig.pond_enabled) {
-          gConfig.pond_enabled = false;
-          saveConfig();
-          Serial.printf("\n[AutoRefill] Tank water FULL (%u/3) -> Pond Refill Demand OFF\n", waterLevel);
-          if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            gState.triggerImmediateTelem = true;
-            xSemaphoreGive(xStateMutex);
-          }
+    // ── PER-PUMP TIMED RUN CHECK & HYDRAULIC AUTOMATION RULES ─────────────────
+    uint8_t pOverride[3] = {};
+    uint32_t pTimedUntil[3] = {};
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      for (int i = 0; i < 3; i++) {
+        pOverride[i] = gState.pumpOverride[i];
+        pTimedUntil[i] = gState.pumpTimedUntil[i];
+        if (pOverride[i] == PUMP_OVERRIDE_FORCE_ON && pTimedUntil[i] > 0 && now >= pTimedUntil[i]) {
+          gState.pumpOverride[i] = PUMP_OVERRIDE_AUTO;
+          gState.pumpTimedUntil[i] = 0;
+          pOverride[i] = PUMP_OVERRIDE_AUTO;
+          pTimedUntil[i] = 0;
+          gState.triggerImmediateTelem = true;
+          logEvent("RELAY", 1, "P%d Timed Run Finished -> Returned to AUTO", i + 1);
         }
       }
 
-      for (int i = 0; i < 3; i++) {
-        bool targetState = waterAvailable && allowed[i];
+      // Calculate active operational rule for SCADA matrix
+      uint8_t currentRule = 3;
+      if (waterLevelValid && waterLevel == 0) {
+        currentRule = 2; // Rule 2: Emergency Dry Trip (Cavitation Safeguard)
+      } else if (autoMode && waterLevelValid && waterLevel <= gConfig.refill_trigger_level) {
+        currentRule = 1; // Rule 1: Tank Low (Auto-Refill Demand ON)
+      } else if (waterLevelValid && waterLevel >= gConfig.refill_cutoff_level) {
+        currentRule = 4; // Rule 4: Tank Full (Refill Satisfied / Cutoff)
+      } else {
+        currentRule = 3; // Rule 3: Nominal Water Available (Parallel Outflow Active)
+      }
+      gState.activeRule = currentRule;
 
-        if (targetState != ph[i]->state) {
-          if (canChangePumpState(*ph[i], targetState, emergencyDry,
-                                 gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
-            if (!targetState && ph[i]->state) {
-              *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
-            } else if (targetState) {
-              pOnSince[i] = millis();
-            }
-            setPumpState(*ph[i], targetState, relayPin[i]);
-            Serial.printf("\n[Ctrl][Auto] Outflow Irrigation Pump P%d -> %s (WL=%u)\n", i + 1, targetState ? "ON" : "OFF", waterLevel);
+      xSemaphoreGive(xStateMutex);
+    }
 
-            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-              gState.triggerImmediateTelem = true;
-              xSemaphoreGive(xStateMutex);
-            }
+    // ── PARALLEL IRRIGATION CONTROL ENGINE WITH INDEPENDENT OVERRIDES & ANTI-INRUSH STAGGER ──
+    bool allowed[3] = {true, true, true};
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      allowed[0] = gState.pumpEnabledAuto[0];
+      allowed[1] = gState.pumpEnabledAuto[1];
+      allowed[2] = gState.pumpEnabledAuto[2];
+      xSemaphoreGive(xStateMutex);
+    }
+
+    bool waterAvailable = (waterLevelValid && waterLevel > 0);
+    bool emergencyDry = (waterLevelValid && waterLevel == 0);
+    static uint32_t lastMotorStartMs = 0;
+
+    for (int i = 0; i < 3; i++) {
+      bool targetState = false;
+
+      // Independent per-pump override evaluation
+      if (pOverride[i] == PUMP_OVERRIDE_FORCE_OFF) {
+        targetState = false; // Forced OFF (Hard Lockout)
+      } else if (pOverride[i] == PUMP_OVERRIDE_FORCE_ON) {
+        // Forced ON (Hand): Runs directly in AUTO or MANUAL, but dry-run empty tank shuts down to protect pump
+        targetState = waterAvailable;
+      } else { // PUMP_OVERRIDE_AUTO
+        if (autoMode) {
+          targetState = waterAvailable && allowed[i];
+        } else {
+          targetState = gConfig.pump_manual_state[i];
+        }
+      }
+
+      if (targetState != ph[i]->state) {
+        // Anti-inrush stagger check: delay simultaneous motor starts by MOTOR_STAGGER_MS
+        if (targetState && (now - lastMotorStartMs < MOTOR_STAGGER_MS)) {
+          continue; // Wait for stagger interval before starting next motor
+        }
+
+        if (canChangePumpState(*ph[i], targetState, emergencyDry,
+                               gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+          if (!targetState && ph[i]->state) {
+            *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
+          } else if (targetState) {
+            pOnSince[i] = millis();
+            lastMotorStartMs = now;
+          }
+          setPumpState(*ph[i], targetState, relayPin[i]);
+          Serial.printf("\n[Ctrl] Outflow Pump P%d -> %s (WL=%u, Override=%u)\n", 
+                        i + 1, targetState ? "ON" : "OFF", waterLevel, pOverride[i]);
+
+          if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            gState.triggerImmediateTelem = true;
+            xSemaphoreGive(xStateMutex);
           }
         }
       }
@@ -1196,7 +1714,6 @@ static void Task_ControlEngine(void *) {
         gState.pumpLastOn[i] = ph[i]->lastOnTime;
         gState.pumpLastOff[i] = ph[i]->lastOffTime;
       }
-      gState.pond = gConfig.pond_enabled;
       gState.demandActive = systemDemandOn;
       gState.tankEmptyAlarm = (autoMode && waterLevelValid && waterLevel == 0);
       gState.loraTimeoutAlarm = (gwSeen && (now - lastGwMs >= LORA_WATCHDOG_TIMEOUT_MS));
@@ -1255,13 +1772,31 @@ static void Task_ControlEngine(void *) {
     }
 
     // ── DISPATCH BROADCAST FOR THE REMOTE POND CHARGER ──────────────────────
+    static uint32_t lastPondBroadcast = 0;
+    static uint8_t pondRetryCount = 0;
     static bool lastDispatchedPond = false;
     bool pondChanged = (gConfig.pond_enabled != lastDispatchedPond);
-    if (radioOk && (pondChanged || (now - lastPondBroadcast >= gConfig.telemetry_interval_ms))) {
+    bool pondAccordSynced = false;
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      pondAccordSynced = (gState.pond == gConfig.pond_enabled);
+      xSemaphoreGive(xStateMutex);
+    }
+    uint32_t accordRetryInterval = (gConfig.lora_sf >= 12) ? 6000UL :
+                                   (gConfig.lora_sf == 11) ? 4500UL : 3000UL;
+    bool needRetry = (!pondAccordSynced) && (pondRetryCount < 5) && ((now - lastPondBroadcast) >= accordRetryInterval);
+    bool periodicBroadcast = (now - lastPondBroadcast >= gConfig.telemetry_interval_ms);
+
+    if (radioOk && (pondChanged || needRetry || periodicBroadcast)) {
       lastPondBroadcast = now;
-      lastDispatchedPond = gConfig.pond_enabled;
+      if (pondChanged) {
+        lastDispatchedPond = gConfig.pond_enabled;
+        pondRetryCount = 0;
+      } else if (needRetry) {
+        pondRetryCount++;
+        Serial.printf("\n[Ctrl] Awaiting Pond Accord ACK (Retry #%u/5)...\n", pondRetryCount);
+      }
       LoRaPacket txPkt = {};
-      txPkt.header = {MY_NETWORK_MAGIC, NODE_POND, NODE_TANK, MSG_CMD};
+      txPkt.header = {gConfig.network_magic, gConfig.pond_id, gConfig.node_id, MSG_CMD};
       txPkt.payload.cmd = {CMD_TARGET_POND, CMD_ACTION_SET, gConfig.pond_enabled ? (uint8_t)1 : (uint8_t)0}; 
       xQueueSend(xTxQueue, &txPkt, 0);
       Serial.printf("\n[Ctrl] Dispatched remote Pond charge state broadcast via LoRa -> %d\n", gConfig.pond_enabled);
@@ -1669,6 +2204,13 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(BOOT_DELAY_MS);
 
+  xStateMutex = xSemaphoreCreateMutex();
+  xLogMutex = xSemaphoreCreateMutex();
+  xRxQueue = xQueueCreate(RXQUEUE_DEPTH, sizeof(LoRaPacket));
+  xTxQueue = xQueueCreate(TXQUEUE_DEPTH, sizeof(LoRaPacket));
+
+  logEvent("SYS", 0, "Tank Node Booting (Firmware build v%u)...", CONFIG_VERSION);
+
   if (psramInit()) {
     gState.psramOk = true;
     gState.psramTotalBytes = ESP.getPsramSize();
@@ -1713,17 +2255,14 @@ void setup() {
   bool radioOk = LoRa.begin(LORA_NSS, LORA_RESET, LORA_BUSY, LORA_IRQ, -1, -1);
   if (radioOk) {
     LoRa.setDio3TcxoCtrl(SX126X_DIO3_OUTPUT_1_8, SX126X_TCXO_DELAY_10);
-    LoRa.setFrequency(LORA_FREQUENCY);
-    LoRa.setTxPower(LORA_TX_POWER_DBM, SX126X_TX_POWER_SX1262);
-    LoRa.setLoRaModulation(LORA_SF, LORA_BW, LORA_CR);
-    LoRa.setSyncWord(LORA_SYNC_WORD);
-    setForRx();
+    gState.radioOk = true;
+    applyLoRaConfig();
     Serial.println("[LoRa] OK — listening");
   } else {
+    gState.radioOk = false;
     Serial.println("[LoRa] INIT FAILED");
   }
 
-  gState.radioOk = radioOk;
   gState.autoMode = (bool)gConfig.boot_auto_mode;
   
   gState.pumpEnabledAuto[0] = gConfig.pump_enabled_auto[0];
@@ -1742,10 +2281,6 @@ void setup() {
       }
     }
   }
-
-  xStateMutex = xSemaphoreCreateMutex();
-  xRxQueue = xQueueCreate(RXQUEUE_DEPTH, sizeof(LoRaPacket));
-  xTxQueue = xQueueCreate(TXQUEUE_DEPTH, sizeof(LoRaPacket));
 
   xTaskCreatePinnedToCore(Task_LoRaManager, "LoRaMgr", STACK_LORA_MGR, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(Task_SerialConsole, "SerialCon", STACK_SERIAL_CON, NULL, 1, NULL, 0);

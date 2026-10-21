@@ -32,7 +32,7 @@
 #define NODE_POND         0x03
 #define NODE_BROADCAST    0xFF
 #define MY_NODE_ID        NODE_TANK
-#define CONFIG_VERSION    38    // Default auto pump mask enabled + multi-node pond support
+#define CONFIG_VERSION    42    // SF12 timing guard, accord retries, manual boost latch
 
 // StatusPayload flags byte (TX)
 #define STATUS_BIT_AUTO   0x01  // auto mode active
@@ -52,16 +52,47 @@
 #define CMD_ACTION_TOGGLE 0x00
 #define CMD_ACTION_SET    0x01
 
+// ─── Per-Pump Independent Override Modes ─────────────────────────────────────
+#define PUMP_OVERRIDE_AUTO        0   // Follows system automation & water level schedule
+#define PUMP_OVERRIDE_FORCE_ON    1   // Manually forced ON (indefinite or timed duration)
+#define PUMP_OVERRIDE_FORCE_OFF   2   // Manually forced OFF (locked out / inhibited)
+#define MOTOR_STAGGER_MS       3000UL // 3-second anti-inrush stagger delay between motor starts
+
 // ─── LoRa RF parameters ───────────────────────────────────────────────────────
 #define LORA_SPI_FREQ         16000000UL  // Hz
 #define LORA_FREQUENCY       868100000UL  // Hz — 868.1 MHz (EU868 band)
-#define LORA_TX_POWER_DBM            22
+#define LORA_TX_POWER_DBM            14
 #define LORA_SF                       9
 #define LORA_BW                  125000UL // Hz
 #define LORA_CR                       5
 #define LORA_SYNC_WORD           0x1424
 #define LORA_PREAMBLE_LEN             8
 #define LORA_MAX_PAYLOAD            255
+
+// ─── Defaults for LoRa RF Configuration ───────────────────────────────────────
+#define DEFAULT_LORA_FREQ_HZ           868100000UL
+#define DEFAULT_LORA_TX_POWER_DBM             14
+#define DEFAULT_LORA_SF                        9
+#define DEFAULT_LORA_BW_KHZ                  125
+#define DEFAULT_LORA_CR                        5
+#define DEFAULT_LORA_LDRO                      0  // 0 = Auto (Symbol >= 16.38ms enables LDRO), 1 = Force ON, 2 = Force OFF
+#define DEFAULT_LORA_SYNC_WORD            0x1424
+#define DEFAULT_LORA_PREAMBLE_LEN              8
+
+// ─── Defaults for Hydraulic & Reservoir Capacity ──────────────────────────────
+#define DEFAULT_TANK_CAPACITY_LITERS       10000UL
+#define DEFAULT_REFILL_TRIGGER_LEVEL           1  // Level <= 1 (<= 33% Low/Empty) demands Pond refill
+#define DEFAULT_REFILL_CUTOFF_LEVEL            3  // Level >= 3 (100% Full) cuts off Pond refill
+
+// ─── Defaults for Network Identities ──────────────────────────────────────────
+#define DEFAULT_NODE_ID                NODE_TANK
+#define DEFAULT_POND_ID                NODE_POND
+#define DEFAULT_GATEWAY_ID             NODE_GATEWAY
+#define DEFAULT_NETWORK_MAGIC          MY_NETWORK_MAGIC
+
+// ─── Defaults for Home Wi-Fi Credentials ──────────────────────────────────────
+#define DEFAULT_WIFI_STA_SSID          "Link2"
+#define DEFAULT_WIFI_STA_PASS          "Horvat2017"
 
 // ─── Default runtime config ───────────────────────────────────────────────────
 #define DEFAULT_PUMP_MIN_RUNTIME_MS    20000UL  
@@ -70,8 +101,8 @@
 #define DEFAULT_NETWORK_TIMEOUT_MS     60000UL  
 
 // ─── Smart Auto-Refill Hysteresis ─────────────────────────────────────────────
-#define TANK_REFILL_TRIGGER_LEVEL            1  // Level <= 1 (<= 33% Low/Empty) demands Pond refill
-#define TANK_REFILL_CUTOFF_LEVEL             3  // Level >= 3 (100% Full) cuts off Pond refill
+#define TANK_REFILL_TRIGGER_LEVEL            1  
+#define TANK_REFILL_CUTOFF_LEVEL             3  
 #define LORA_WATCHDOG_TIMEOUT_MS      600000UL  // 10 minutes without gateway packet triggers warning
 
 // ─── PSRAM In-Memory Telemetry Buffer ─────────────────────────────────────────

@@ -77,6 +77,8 @@ function connectWebSocket() {
         renderTelemetry(msg);
       } else if (msg.type === "config") {
         renderConfig(msg);
+      } else if (msg.type === "log_event") {
+        addLogEntry(msg);
       } else if (msg.type === "toast") {
         showToast(msg.msg, msg.is_err);
         if (msg.is_err) playAlert();
@@ -115,46 +117,149 @@ function sendJson(obj) {
 // ─── TELEMETRY RENDERING ───────────────────────────────────────────
 let lastErrorCode = 0;
 
+function formatTimeMinSec(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
+function formatHoursMins(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return `${h}h ${m.toString().padStart(2, '0')}m`;
+}
+
 function renderTelemetry(t) {
+  // 0. ISA-18.2 Priority Alarm & Operational Status Banner
+  const alarmContainer = document.getElementById("alarmBanner");
+  const alarmBeacon = document.getElementById("alarmBeacon");
+  const alarmTitle = document.getElementById("alarmTitle");
+  const alarmDesc = document.getElementById("alarmDesc");
+
+  if (t.err === 4) {
+    if (alarmContainer) alarmContainer.className = "alarm-banner-container warning glass-card";
+    if (alarmBeacon) alarmBeacon.className = "alarm-beacon warning";
+    if (alarmTitle) alarmTitle.innerText = "WARNING • FLOAT SENSOR PLAUSIBILITY VIOLATION";
+    if (alarmDesc) alarmDesc.innerText = "Float switch contacts contradictory. Verify PCF8574 float wiring & buoyant switches.";
+  } else if (t.err === 2) {
+    if (alarmContainer) alarmContainer.className = "alarm-banner-container critical glass-card";
+    if (alarmBeacon) alarmBeacon.className = "alarm-beacon critical";
+    if (alarmTitle) alarmTitle.innerText = "CRITICAL FAULT • PCF8574 I²C DISCONNECTED";
+    if (alarmDesc) alarmDesc.innerText = "Digital I/O expander uncommunicative on I2C bus (SDA:1, SCL:2). Hardware interlock tripped.";
+  } else if (t.err === 1) {
+    if (alarmContainer) alarmContainer.className = "alarm-banner-container critical glass-card";
+    if (alarmBeacon) alarmBeacon.className = "alarm-beacon critical";
+    if (alarmTitle) alarmTitle.innerText = "RADIO FAULT • SX1262 LoRa SPI LINK LOST";
+    if (alarmDesc) alarmDesc.innerText = "LoRa transceiver not responding to SPI transactions. Remote telemetry unreachable.";
+  } else if (t.wl === 0) {
+    if (alarmContainer) alarmContainer.className = "alarm-banner-container critical glass-card";
+    if (alarmBeacon) alarmBeacon.className = "alarm-beacon critical";
+    if (alarmTitle) alarmTitle.innerText = "CRITICAL TRIP • LEVEL 0 DRY-RUN PROTECTION ACTIVE";
+    if (alarmDesc) alarmDesc.innerText = "Reservoir is empty (<1,000L). All outflow pumps locked out to protect against cavitation. Pond refill prioritized.";
+  } else {
+    if (alarmContainer) alarmContainer.className = "alarm-banner-container glass-card";
+    if (alarmBeacon) alarmBeacon.className = "alarm-beacon normal";
+    if (alarmTitle) alarmTitle.innerText = "NORMAL OPERATION • ALL INTERLOCKS NOMINAL";
+    if (alarmDesc) alarmDesc.innerText = "Water level within operating limits. Anti-inrush start stagger (3s) and anti-chatter locks active.";
+  }
+
+  // Active Rule determination (firmware streams t.active_rule: 1..4)
+  const activeRuleNames = [
+    "UNKNOWN",
+    "RULE 1 (FULL 100%)",
+    "RULE 2 (MID 66%)",
+    "RULE 3 (LOW 33%)",
+    "RULE 4 (DRY RUN 0%)"
+  ];
+  const curRule = (t.active_rule >= 1 && t.active_rule <= 4) ? t.active_rule : (t.wl === 0 ? 4 : (t.wl === 1 ? 3 : (t.wl === 2 ? 2 : 1)));
+  const bRule = document.getElementById("bannerActiveRule");
+  if (bRule) bRule.innerText = activeRuleNames[curRule] || `RULE ${curRule}`;
+
+  // Overrides summary
+  let overrideCount = 0;
+  const ovrDescriptions = [];
+  if (t.overrides) {
+    for (let i = 0; i < 3; i++) {
+      if (t.overrides[i] === 1) {
+        overrideCount++;
+        ovrDescriptions.push(`P${i+1}: FORCE ON`);
+      } else if (t.overrides[i] === 2) {
+        overrideCount++;
+        ovrDescriptions.push(`P${i+1}: LOCKED OFF`);
+      }
+    }
+  }
+  const bOvr = document.getElementById("bannerOverrides");
+  if (bOvr) {
+    bOvr.innerText = overrideCount > 0 ? ovrDescriptions.join(", ") : "NONE (AUTO)";
+    bOvr.style.color = overrideCount > 0 ? "var(--amber)" : "var(--cyan)";
+  }
+
+  const bLatch = document.getElementById("bannerLatch");
+  if (bLatch) {
+    bLatch.innerText = t.demand ? "CHARGING LATCH ACTIVE" : "IDLE";
+    bLatch.style.color = t.demand ? "var(--green)" : "var(--muted)";
+  }
+
+  // Active Demodulator LDRO status badge in modal
+  const ldroBadge = document.getElementById("ldroLiveBadge");
+  if (ldroBadge && t.ldro_active !== undefined) {
+    if (t.ldro_active) {
+      ldroBadge.className = "badge-tag running";
+      ldroBadge.innerText = t.lora_ldro === 1 ? "FORCE ON (ACTIVE)" : `AUTO (ACTIVE ON SF${t.lora_sf || 11})`;
+    } else {
+      ldroBadge.className = "badge-tag idle";
+      ldroBadge.innerText = t.lora_ldro === 2 ? "FORCE OFF" : "INACTIVE";
+    }
+  }
+
   // 1. Water Level Height & Text
   const heights = [0, 33, 66, 100];
-  const labels = ["WL: 0 (EMPTY 0%)", "WL: 1 (LOW 33%)", "WL: 2 (MID 66%)", "WL: 3 (FULL 100%)"];
+  const labels = [
+    "WL: 0 (EMPTY 0% <1,000L)",
+    "WL: 1 (LOW 33% ~3,300L)",
+    "WL: 2 (MID 66% ~6,600L)",
+    "WL: 3 (FULL 100% ~10,000L)"
+  ];
   const wl = Math.min(Math.max(t.wl, 0), 3);
 
   const liquidBody = document.getElementById("liquidBody");
-  liquidBody.style.height = `${heights[wl]}%`;
-  document.getElementById("tankLevelText").innerText = labels[wl];
+  if (liquidBody) liquidBody.style.height = `${heights[wl]}%`;
+  const lvlText = document.getElementById("tankLevelText");
+  if (lvlText) lvlText.innerText = labels[wl];
 
   // 2. Float Sensor Buoys (L1, L2, L3)
   const b1 = document.getElementById("beadL1");
   const b2 = document.getElementById("beadL2");
   const b3 = document.getElementById("beadL3");
 
-  b1.classList.toggle("submerged", wl >= 1);
-  b2.classList.toggle("submerged", wl >= 2);
-  b3.classList.toggle("submerged", wl >= 3);
+  if (b1) b1.classList.toggle("submerged", wl >= 1);
+  if (b2) b2.classList.toggle("submerged", wl >= 2);
+  if (b3) b3.classList.toggle("submerged", wl >= 3);
 
   // Sensor Plausibility Alert Check
   const alertBar = document.getElementById("sensorAlertBar");
   const healthText = document.getElementById("sensorHealthText");
 
-  if (t.err === 4) { // ERR_FLOAT_PLAUSIBILITY
-    b1.classList.add("fault");
-    b2.classList.add("fault");
-    b3.classList.add("fault");
-    alertBar.classList.add("alert");
-    healthText.innerText = "SENSOR FAULT: Float switch plausibility violation!";
-    if (lastErrorCode !== 4) playAlert();
-  } else if (t.err === 2) { // ERR_PCF_I2C
-    alertBar.classList.add("alert");
-    healthText.innerText = "HARDWARE FAULT: PCF8574 I²C Bus Disconnected!";
-    if (lastErrorCode !== 2) playAlert();
-  } else {
-    b1.classList.remove("fault");
-    b2.classList.remove("fault");
-    b3.classList.remove("fault");
-    alertBar.classList.remove("alert");
-    healthText.innerText = "Float switches healthy & plausible";
+  if (alertBar && healthText) {
+    if (t.err === 4) { // ERR_FLOAT_PLAUSIBILITY
+      if (b1) b1.classList.add("fault");
+      if (b2) b2.classList.add("fault");
+      if (b3) b3.classList.add("fault");
+      alertBar.classList.add("alert");
+      healthText.innerText = "SENSOR FAULT: Float switch plausibility violation!";
+      if (lastErrorCode !== 4) playAlert();
+    } else if (t.err === 2) { // ERR_PCF_I2C
+      alertBar.classList.add("alert");
+      healthText.innerText = "HARDWARE FAULT: PCF8574 I²C Bus Disconnected!";
+      if (lastErrorCode !== 2) playAlert();
+    } else {
+      if (b1) b1.classList.remove("fault");
+      if (b2) b2.classList.remove("fault");
+      if (b3) b3.classList.remove("fault");
+      alertBar.classList.remove("alert");
+      healthText.innerText = "Float switches healthy & plausible • Direct suction manifold";
+    }
   }
   lastErrorCode = t.err;
 
@@ -163,49 +268,137 @@ function renderTelemetry(t) {
   const waterJet = document.getElementById("waterJet");
   const pondActive = Boolean(t.pond);
 
-  inflowWater.classList.toggle("active", pondActive);
-  waterJet.classList.toggle("active", pondActive);
+  if (inflowWater) inflowWater.classList.toggle("active", pondActive);
+  if (waterJet) waterJet.classList.toggle("active", pondActive);
 
   // Pond Controller Card
   const indPond = document.getElementById("indPond");
   const btnPond = document.getElementById("btnPond");
   const latchBadge = document.getElementById("latchBadge");
 
-  indPond.classList.toggle("active", pondActive);
-  btnPond.innerText = pondActive ? "STOP POND" : "START POND";
-  latchBadge.innerText = t.demand ? "CHARGING LATCH: ON" : "LATCH: IDLE";
-  latchBadge.classList.toggle("active", Boolean(t.demand));
+  if (indPond) indPond.classList.toggle("active", pondActive);
+  if (btnPond) btnPond.innerText = pondActive ? "STOP POND" : "REQUEST REFILL";
+  if (latchBadge) {
+    latchBadge.innerText = t.demand ? "CHARGING LATCH: ON" : "LATCH: IDLE";
+    latchBadge.classList.toggle("active", Boolean(t.demand));
+  }
 
-  // 4. Outflow Pipes & Pump Cards (P1, P2, P3)
+  // 4. Outflow Pipes & Pump Faceplates (P1, P2, P3)
   const isAuto = (t.mode === "AUTO");
 
   for (let i = 0; i < 3; i++) {
     const pNum = i + 1;
     const pState = Boolean(t.pumps[i]);
-    const mask = Boolean(t.auto_mask[i]);
+    const mask = t.auto_mask ? Boolean(t.auto_mask[i]) : true;
+    const ovr = t.overrides ? t.overrides[i] : 0;
+    const timedLeft = t.timed_left ? t.timed_left[i] : 0;
+    const runLeft = t.run_left ? t.run_left[i] : 0;
+    const cdLeft = t.cd_left ? t.cd_left[i] : 0;
 
-    // Turbines & Streams
-    document.getElementById(`turbineP${pNum}`).classList.toggle("active", pState);
-    document.getElementById(`streamP${pNum}`).classList.toggle("active", pState);
+    // Turbines & Streams in P&ID schematic
+    const turb = document.getElementById(`turbineP${pNum}`);
+    const stream = document.getElementById(`streamP${pNum}`);
+    if (turb) turb.classList.toggle("active", pState);
+    if (stream) stream.classList.toggle("active", pState);
 
-    // Indicators & Pills
-    document.getElementById(`indP${pNum}`).classList.toggle("active", pState);
-    const pill = document.getElementById(`pillP${pNum}`);
-    const btn = document.getElementById(`btnP${pNum}`);
-    const chk = document.getElementById(`maskP${pNum}`);
+    // Indicator
+    const ind = document.getElementById(`indP${pNum}`);
+    if (ind) ind.classList.toggle("active", pState);
 
-    if (pState) {
-      pill.innerText = "RUNNING";
-      pill.className = "status-pill running";
-      btn.innerText = `STOP P${pNum}`;
-    } else {
-      pill.innerText = "IDLE / READY";
-      pill.className = "status-pill";
-      btn.innerText = `START P${pNum}`;
+    // 3-State Override Buttons
+    const btnAuto = document.getElementById(`ovrAutoP${pNum}`);
+    const btnOn = document.getElementById(`ovrOnP${pNum}`);
+    const btnOff = document.getElementById(`ovrOffP${pNum}`);
+    if (btnAuto) btnAuto.classList.toggle("active", ovr === 0);
+    if (btnOn) btnOn.classList.toggle("active", ovr === 1);
+    if (btnOff) btnOff.classList.toggle("active", ovr === 2);
+
+    // Timed Run Badge
+    const timedBadge = document.getElementById(`timedBadgeP${pNum}`);
+    if (timedBadge) {
+      if (timedLeft > 0) {
+        timedBadge.style.display = "inline-block";
+        timedBadge.innerText = formatTimeMinSec(timedLeft);
+      } else {
+        timedBadge.style.display = "none";
+      }
     }
 
-    if (chk) chk.checked = mask;
-    btn.disabled = isAuto; // Manual toggle disabled during Auto Mode
+    // Status Pill
+    const pill = document.getElementById(`pillP${pNum}`);
+    const btnToggle = document.getElementById(`btnP${pNum}`);
+    if (pill) {
+      if (pState) {
+        if (timedLeft > 0) {
+          pill.innerText = `TIMED [${formatTimeMinSec(timedLeft)}]`;
+          pill.className = "status-pill running";
+        } else if (ovr === 1) {
+          pill.innerText = "FORCED ON";
+          pill.className = "status-pill running";
+        } else {
+          pill.innerText = "RUNNING (AUTO)";
+          pill.className = "status-pill running";
+        }
+      } else {
+        if (ovr === 2) {
+          pill.innerText = "LOCKED OFF";
+          pill.className = "status-pill locked";
+        } else if (cdLeft > 0) {
+          pill.innerText = `COOLDOWN [${cdLeft}s]`;
+          pill.className = "status-pill cooldown";
+        } else if (wl === 0) {
+          pill.innerText = "TRIPPED (EMPTY)";
+          pill.className = "status-pill fault";
+        } else {
+          pill.innerText = "IDLE / READY";
+          pill.className = "status-pill";
+        }
+      }
+    }
+
+    if (btnToggle) {
+      btnToggle.innerText = pState ? `STOP P${pNum}` : `START P${pNum}`;
+    }
+
+    // Auto mask checkbox
+    const chkMask = document.getElementById(`maskP${pNum}`);
+    if (chkMask) chkMask.checked = mask;
+
+    // Feedback Gauge (Interlocks & Locks)
+    const gLbl = document.getElementById(`gaugeLblP${pNum}`);
+    const gVal = document.getElementById(`gaugeValP${pNum}`);
+    const gFill = document.getElementById(`gaugeFillP${pNum}`);
+    const minRunSec = (t.cfg_runtime || 20000) / 1000;
+    const minCdSec = (t.cfg_cooldown || 20000) / 1000;
+
+    if (pState && runLeft > 0) {
+      if (gLbl) gLbl.innerText = "MIN RUN LOCK:";
+      if (gVal) { gVal.innerText = `${runLeft}s remaining`; gVal.className = "gauge-val running"; }
+      if (gFill) { gFill.style.width = `${Math.round((runLeft / minRunSec) * 100)}%`; gFill.style.background = "var(--cyan)"; }
+    } else if (!pState && cdLeft > 0) {
+      if (gLbl) gLbl.innerText = "COOLDOWN LOCK:";
+      if (gVal) { gVal.innerText = `${cdLeft}s remaining`; gVal.className = "gauge-val locked"; }
+      if (gFill) { gFill.style.width = `${Math.round((cdLeft / minCdSec) * 100)}%`; gFill.style.background = "var(--amber)"; }
+    } else if (wl === 0) {
+      if (gLbl) gLbl.innerText = "DRY RUN TRIP:";
+      if (gVal) { gVal.innerText = "L0 Lockout (Inhibited)"; gVal.className = "gauge-val locked"; }
+      if (gFill) { gFill.style.width = "100%"; gFill.style.background = "var(--red)"; }
+    } else if (ovr === 2) {
+      if (gLbl) gLbl.innerText = "HARD LOCKOUT:";
+      if (gVal) { gVal.innerText = "Operator Inhibit (Off)"; gVal.className = "gauge-val locked"; }
+      if (gFill) { gFill.style.width = "100%"; gFill.style.background = "var(--red)"; }
+    } else {
+      if (gLbl) gLbl.innerText = "INTERLOCK:";
+      if (gVal) { gVal.innerText = "Ready (Clear)"; gVal.className = "gauge-val"; }
+      if (gFill) { gFill.style.width = "0%"; }
+    }
+
+    // Odometer
+    const odo = document.getElementById(`odoP${pNum}`);
+    if (odo && t.rt_stats) {
+      const sec = t.rt_stats[i] || 0;
+      odo.innerText = `Runtime: ${formatHoursMins(sec)} • Total: ${sec}s`;
+    }
   }
 
   // 5. Operation Mode UI
@@ -214,35 +407,66 @@ function renderTelemetry(t) {
   const modeBanner = document.getElementById("modeBanner");
   const modeHint = document.getElementById("modeHint");
 
-  btnAuto.classList.toggle("active", isAuto);
-  btnMan.classList.toggle("active", !isAuto);
-  modeBanner.innerText = isAuto ? "AUTOMATIC MODE" : "MANUAL MODE";
-  modeBanner.className = isAuto ? "mode-status-text auto" : "mode-status-text";
-  modeHint.innerText = isAuto
-    ? "Auto-irrigation active. Outflow pumps governed by water capacity & selection mask."
-    : "Manual overrides active. Anti-chatter cooldown protection enforced.";
-
-  // 6. HUD Badges & Diagnostics
-  document.getElementById("badgeRssi").innerText = `RSSI: ${t.rssi} dBm`;
-  document.getElementById("badgeUptime").innerText = `Up: ${formatUptime(t.uptime)}`;
-
-  if (t.sta && t.sta_ip) {
-    document.getElementById("badgeConn").innerText = `STA: ${t.sta_ip}`;
-  } else {
-    document.getElementById("badgeConn").innerText = "SoftAP (192.168.4.1)";
+  if (btnAuto) btnAuto.classList.toggle("active", isAuto);
+  if (btnMan) btnMan.classList.toggle("active", !isAuto);
+  if (modeBanner) {
+    modeBanner.innerText = isAuto ? "AUTOMATIC MODE" : "MANUAL MODE";
+    modeBanner.className = isAuto ? "mode-status-text auto" : "mode-status-text";
+  }
+  if (modeHint) {
+    modeHint.innerText = isAuto
+      ? "Auto-irrigation active. Individual overrides take priority. Stagger delay (3s) enforced."
+      : "Manual control deck active. Anti-chatter cooldown & dry-run interlocks enforced.";
   }
 
-  document.getElementById("diagPcf").innerText = t.pcf_ok ? "ONLINE" : "FAULT";
-  document.getElementById("diagPcf").style.color = t.pcf_ok ? "var(--green)" : "var(--red)";
-  document.getElementById("diagRssi").innerText = `${t.rssi} dBm`;
-  document.getElementById("diagSnr").innerText = `${t.snr} dB`;
-  document.getElementById("diagHeap").innerText = `${Math.round(t.heap / 1024)} KB`;
-  document.getElementById("diagBoots").innerText = `#${t.boots}`;
+  // 6. HUD Badges & Diagnostics
+  const bRssi = document.getElementById("badgeRssi");
+  if (bRssi) bRssi.innerText = `RSSI: ${t.rssi} dBm`;
+  const bUp = document.getElementById("badgeUptime");
+  if (bUp) bUp.innerText = `Up: ${formatUptime(t.uptime)}`;
+
+  const bConn = document.getElementById("badgeConn");
+  if (bConn) {
+    if (t.sta && t.sta_ip) {
+      bConn.innerText = `STA: ${t.sta_ip}`;
+    } else {
+      bConn.innerText = "SoftAP (192.168.4.1)";
+    }
+  }
+
+  const dPcf = document.getElementById("diagPcf");
+  if (dPcf) {
+    dPcf.innerText = t.pcf_ok ? "ONLINE" : "FAULT";
+    dPcf.style.color = t.pcf_ok ? "var(--green)" : "var(--red)";
+  }
+  const dRssi = document.getElementById("diagRssi");
+  if (dRssi) dRssi.innerText = `${t.rssi} dBm`;
+  const dSnr = document.getElementById("diagSnr");
+  if (dSnr) dSnr.innerText = `${t.snr} dB`;
+  const dHeap = document.getElementById("diagHeap");
+  if (dHeap) dHeap.innerText = `${Math.round(t.heap / 1024)} KB`;
+  const dBoots = document.getElementById("diagBoots");
+  if (dBoots) dBoots.innerText = `#${t.boots}`;
 
   // 7. Update Sparkline Canvas
   updateSparkline(wl, t.rssi);
 
-  // 8. Render Live SCADA I/O & Parameters Matrix
+  // 8. Update Hydraulic Automation Matrix Rows
+  for (let r = 1; r <= 4; r++) {
+    const row = document.getElementById(`ruleRow${r}`);
+    const badge = document.getElementById(`ruleBadge${r}`);
+    const isActive = (r === curRule);
+    if (row) row.classList.toggle("active-rule", isActive);
+    if (badge) {
+      badge.innerText = isActive ? "▶ ACTIVE NOW" : "IDLE";
+    }
+  }
+  const matActiveBadge = document.getElementById("activeRuleBadge");
+  if (matActiveBadge) {
+    matActiveBadge.innerText = `ACTIVE: ${activeRuleNames[curRule] || ('RULE ' + curRule)}`;
+  }
+
+  // 9. Render Live SCADA I/O & Parameters Matrix
   renderMatrix(t);
 }
 
@@ -255,12 +479,36 @@ function renderConfig(c) {
   const aCheck = document.getElementById("cfgAlwaysOn");
   const sInput = document.getElementById("cfgStaSsid");
 
-  if (rInput) rInput.value = c.runtime;
-  if (cInput) cInput.value = c.cooldown;
-  if (tInput) tInput.value = c.telem;
-  if (bSelect) bSelect.value = c.boot_auto;
-  if (aCheck) aCheck.checked = Boolean(c.always_on);
+  if (rInput && c.runtime !== undefined) rInput.value = c.runtime;
+  if (cInput && c.cooldown !== undefined) cInput.value = c.cooldown;
+  if (tInput && c.telem !== undefined) tInput.value = c.telem;
+  if (bSelect && c.boot_auto !== undefined) bSelect.value = c.boot_auto;
+  if (aCheck && c.always_on !== undefined) aCheck.checked = Boolean(c.always_on);
   if (sInput && c.sta_ssid) sInput.value = c.sta_ssid;
+
+  // Hydraulics
+  const capInput = document.getElementById("cfgCapacity");
+  const trigSelect = document.getElementById("cfgTrigger");
+  const cutSelect = document.getElementById("cfgCutoff");
+  if (capInput && c.tank_capacity) capInput.value = c.tank_capacity;
+  if (trigSelect && c.refill_trigger !== undefined) trigSelect.value = c.refill_trigger;
+  if (cutSelect && c.refill_cutoff !== undefined) cutSelect.value = c.refill_cutoff;
+
+  // LoRa RF
+  const freqInput = document.getElementById("cfgLoraFreq");
+  const pwrInput = document.getElementById("cfgLoraPwr");
+  const sfSelect = document.getElementById("cfgLoraSf");
+  const bwSelect = document.getElementById("cfgLoraBw");
+  const crSelect = document.getElementById("cfgLoraCr");
+  const ldroSelect = document.getElementById("cfgLoraLdro");
+  const syncInput = document.getElementById("cfgLoraSync");
+  if (freqInput && c.lora_freq) freqInput.value = c.lora_freq;
+  if (pwrInput && c.lora_power !== undefined) pwrInput.value = c.lora_power;
+  if (sfSelect && c.lora_sf) sfSelect.value = c.lora_sf;
+  if (bwSelect && c.lora_bw) bwSelect.value = c.lora_bw;
+  if (crSelect && c.lora_cr) crSelect.value = c.lora_cr;
+  if (ldroSelect && c.lora_ldro !== undefined) ldroSelect.value = c.lora_ldro;
+  if (syncInput && c.lora_sync) syncInput.value = c.lora_sync;
 }
 
 // ─── REAL-TIME SPARKLINE CANVAS GRAPH ──────────────────────────────
@@ -295,10 +543,10 @@ function updateSparkline(level, rssi) {
 
   // 1. Draw Water Level line (0 to 3 scaled to height)
   ctx.beginPath();
-  ctx.strokeStyle = "#00f0ff";
-  ctx.lineWidth = 2.5;
-  ctx.shadowColor = "rgba(0, 240, 255, 0.5)";
-  ctx.shadowBlur = 8;
+  ctx.strokeStyle = "#0ea5e9";
+  ctx.lineWidth = 2.0;
+  ctx.shadowColor = "rgba(14, 165, 233, 0.3)";
+  ctx.shadowBlur = 4;
 
   for (let i = 0; i < n; i++) {
     const x = i * stepX;
@@ -311,10 +559,10 @@ function updateSparkline(level, rssi) {
 
   // 2. Draw RSSI line (-120 dBm to -30 dBm)
   ctx.beginPath();
-  ctx.strokeStyle = "#ff00ff";
+  ctx.strokeStyle = "#a78bfa";
   ctx.lineWidth = 1.5;
-  ctx.shadowColor = "rgba(255, 0, 255, 0.4)";
-  ctx.shadowBlur = 6;
+  ctx.shadowColor = "rgba(167, 139, 250, 0.25)";
+  ctx.shadowBlur = 4;
 
   for (let i = 0; i < n; i++) {
     const x = i * stepX;
@@ -332,6 +580,28 @@ function updateSparkline(level, rssi) {
 function setMode(isAuto) {
   playClick();
   sendJson({ cmd: "mode" });
+}
+
+function setPumpOverride(id, mode, durationMin = null) {
+  playClick();
+  if (durationMin === null) {
+    const durSelect = document.getElementById(`durP${id}`);
+    durationMin = durSelect ? parseInt(durSelect.value, 10) : 0;
+  }
+  sendJson({
+    cmd: "set_pump_override",
+    id: id,
+    mode: mode,
+    duration: durationMin
+  });
+}
+
+function onDurationChange(id) {
+  const durSelect = document.getElementById(`durP${id}`);
+  const dur = durSelect ? parseInt(durSelect.value, 10) : 0;
+  if (dur > 0) {
+    showToast(`P${id} duration set to ${dur} min. Click 'FORCE ON' to start timed run.`, false);
+  }
 }
 
 function togglePump(id) {
@@ -352,35 +622,150 @@ function updateAutoMask() {
   sendJson({ cmd: "set_auto_mask", mask: [m1, m2, m3] });
 }
 
-function saveConfiguration() {
+// ─── LOGGING & EVENT CONSOLE ────────────────────────────────────────
+let cachedLogs = [];
+let logFilter = 'ALL';
+
+function addLogEntry(e) {
+  cachedLogs.push(e);
+  if (cachedLogs.length > 100) cachedLogs.shift();
+  renderLogs();
+}
+
+function filterLogs(cat) {
+  logFilter = cat;
+  renderLogs();
+}
+
+function clearLogs() {
+  playAlert();
+  sendJson({ cmd: "clear_logs" });
+  cachedLogs = [];
+  renderLogs();
+}
+
+function renderLogs() {
+  const box = document.getElementById("logConsoleBox");
+  if (!box) return;
+  const filtered = (logFilter === 'ALL') ? cachedLogs : cachedLogs.filter(l => l.cat === logFilter);
+  box.innerHTML = filtered.map(l => `
+    <div class="log-entry">
+      <span class="log-ts">${new Date(l.ts * 1000).toLocaleTimeString()}</span>
+      <span class="log-cat log-cat-${l.cat}">${l.cat}</span>
+      <span class="log-msg">${l.msg}</span>
+    </div>
+  `).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function saveHydraulicsConfig() {
   playChime();
+  const cap = parseInt(document.getElementById("cfgCapacity").value, 10);
+  const trig = parseInt(document.getElementById("cfgTrigger").value, 10);
+  const cut = parseInt(document.getElementById("cfgCutoff").value, 10);
+  sendJson({
+    cmd: "set_hydraulic_config",
+    capacity: cap,
+    trigger: trig,
+    cutoff: cut
+  });
+
   const r = parseInt(document.getElementById("cfgRuntime").value, 10);
   const c = parseInt(document.getElementById("cfgCooldown").value, 10);
   const t = parseInt(document.getElementById("cfgTelem").value, 10);
   const b = parseInt(document.getElementById("cfgBootAuto").value, 10);
-  const a = document.getElementById("cfgAlwaysOn").checked ? 1 : 0;
-  const ssid = document.getElementById("cfgStaSsid").value.trim();
-  const pass = document.getElementById("cfgStaPass").value.trim();
-
-  // Save runtime timing config
   sendJson({
     cmd: "set_config",
     runtime: r,
     cooldown: c,
     telem: t,
-    boot_auto: b,
-    always_on: a
+    boot_auto: b
   });
+  showToast("Hydraulics & Timings Saved!", false);
+}
 
-  // Save Home Wi-Fi credentials if entered
+function saveLoraConfig() {
+  playChime();
+  const freq = parseInt(document.getElementById("cfgLoraFreq").value, 10);
+  const pwr = parseInt(document.getElementById("cfgLoraPwr").value, 10);
+  const sf = parseInt(document.getElementById("cfgLoraSf").value, 10);
+  const bw = parseInt(document.getElementById("cfgLoraBw").value, 10);
+  const cr = parseInt(document.getElementById("cfgLoraCr").value, 10);
+  const ldro = parseInt(document.getElementById("cfgLoraLdro").value, 10);
+  const sync = document.getElementById("cfgLoraSync").value.trim();
+  sendJson({
+    cmd: "set_lora_config",
+    freq: freq,
+    power: pwr,
+    sf: sf,
+    bw: bw,
+    cr: cr,
+    ldro: isNaN(ldro) ? 0 : ldro,
+    sync: sync
+  });
+  showToast("LoRa RF Tuning Applied!", false);
+}
+
+function saveWifiConfig() {
+  playChime();
+  const ssid = document.getElementById("cfgStaSsid").value.trim();
+  const pass = document.getElementById("cfgStaPass").value.trim();
+  const a = document.getElementById("cfgAlwaysOn").checked ? 1 : 0;
   sendJson({
     cmd: "set_wifi",
     ssid: ssid,
     pass: pass,
     always_on: a
   });
+  showToast("Wi-Fi Credentials Saved!", false);
+}
 
-  closeSettingsModal();
+function uploadOtaFirmware() {
+  const fileInput = document.getElementById("otaFileInput");
+  if (!fileInput.files || fileInput.files.length === 0) {
+    alert("Please select a .bin firmware file first.");
+    return;
+  }
+  const file = fileInput.files[0];
+  const formData = new FormData();
+  formData.append("update", file);
+
+  const progBar = document.getElementById("otaProgressBar");
+  const progFill = document.getElementById("otaProgressFill");
+  const otaStatus = document.getElementById("otaUploadStatus");
+
+  progBar.style.display = "block";
+  progFill.style.width = "0%";
+  otaStatus.innerText = "Uploading firmware...";
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/update", true);
+
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round((e.loaded / e.total) * 100);
+      progFill.style.width = pct + "%";
+      otaStatus.innerText = `Uploading: ${pct}% (${Math.round(e.loaded/1024)} KB / ${Math.round(e.total/1024)} KB)`;
+    }
+  };
+
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      otaStatus.innerText = "Flashing complete! Device rebooting... Reloading in 10s.";
+      progFill.style.background = "var(--green)";
+      setTimeout(() => { location.reload(); }, 10000);
+    } else {
+      otaStatus.innerText = "Update failed: " + xhr.responseText;
+      progFill.style.background = "var(--red)";
+    }
+  };
+
+  xhr.onerror = () => {
+    otaStatus.innerText = "Network error during upload.";
+    progFill.style.background = "var(--red)";
+  };
+
+  xhr.send(formData);
 }
 
 function restoreDefaults() {
@@ -402,6 +787,7 @@ function openSettingsModal() {
   playClick();
   document.getElementById("settingsModal").classList.add("open");
   sendJson({ cmd: "get_config" });
+  sendJson({ cmd: "get_logs" });
 }
 
 function closeSettingsModal() {
@@ -431,7 +817,7 @@ function formatUptime(seconds) {
   return `${s}s`;
 }
 
-// Audio Toggle Button
+// Audio Toggle Button & Settings Tabs Init
 document.addEventListener("DOMContentLoaded", () => {
   const btnAudio = document.getElementById("btnAudioToggle");
   const savedAudio = localStorage.getItem("tank_audio");
@@ -447,6 +833,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("btnSettingsOpen").addEventListener("click", openSettingsModal);
   document.getElementById("btnSettingsClose").addEventListener("click", closeSettingsModal);
+
+  // Tab switching inside settings modal
+  document.querySelectorAll(".settings-tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".settings-tab-btn").forEach(b => b.classList.remove("active"));
+      document.querySelectorAll(".settings-tab-pane").forEach(p => p.classList.remove("active"));
+      btn.classList.add("active");
+      const target = btn.getAttribute("data-tab");
+      const pane = document.getElementById(target);
+      if (pane) pane.classList.add("active");
+    });
+  });
 
   // Close modal when clicking outside card
   document.getElementById("settingsModal").addEventListener("click", (e) => {

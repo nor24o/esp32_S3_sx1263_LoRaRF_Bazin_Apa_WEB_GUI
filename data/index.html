@@ -7,10 +7,6 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- Ambient background glow particles -->
-  <div class="bg-glow"></div>
-  <div class="bg-grid"></div>
-
   <div class="app-container">
     <!-- Top HUD Navigation Header -->
     <header class="hud-header glass-card">
@@ -41,12 +37,31 @@
       </div>
     </header>
 
+    <!-- ISA-18.2 Priority Alarm & Operational Status Banner -->
+    <div class="alarm-banner-container glass-card" id="alarmBanner">
+      <div class="alarm-left">
+        <div class="alarm-beacon normal" id="alarmBeacon"></div>
+        <div class="alarm-text-block">
+          <div class="alarm-title" id="alarmTitle">NORMAL OPERATION &bull; INTERLOCKS NOMINAL</div>
+          <div class="alarm-desc" id="alarmDesc">Water level within operating limits. Anti-inrush start stagger (3s) and anti-chatter locks active.</div>
+        </div>
+      </div>
+      <div class="alarm-right-metrics">
+        <div class="banner-pill" title="Current Automation Rule active on ESP32-S3"><span class="bp-label">HYDRAULIC RULE:</span> <span class="bp-val" id="bannerActiveRule">RULE 2 (MID WL)</span></div>
+        <div class="banner-pill" title="Pumps with active manual overrides"><span class="bp-label">ACTIVE OVERRIDES:</span> <span class="bp-val" id="bannerOverrides">NONE (AUTO)</span></div>
+        <div class="banner-pill" title="LoRa remote pond refill latch"><span class="bp-label">POND REFILL:</span> <span class="bp-val" id="bannerLatch">IDLE</span></div>
+      </div>
+    </div>
+
     <!-- Main Grid -->
     <main class="main-grid">
       <!-- Left Column: Fluid Tank Reservoir & Mechanical Simulation -->
       <section class="reservoir-card glass-card">
         <div class="card-header">
-          <h2>RESERVOIR SIMULATION</h2>
+          <div class="card-header-left">
+            <h2>HYDRAULIC PROCESS SCHEMATIC (P&amp;ID)</h2>
+            <p class="section-sub">Direct Inflow &bull; 10,000L Storage &bull; 3 Parallel Outflow Lines (Direct Suction, No Check Valves / No PID)</p>
+          </div>
           <span class="level-display" id="tankLevelText">WL: 0 (EMPTY 0%)</span>
         </div>
 
@@ -54,7 +69,7 @@
           <!-- Inflow pipe from remote pond pump (top left) -->
           <div class="pipe-inflow-container" id="inflowContainer">
             <div class="pipe inflow-pipe">
-              <div class="pipe-label">INFLOW (POND)</div>
+              <div class="pipe-label">INFLOW (POND 0x03)</div>
               <div class="pipe-flow-water" id="inflowPipeWater"></div>
             </div>
             <!-- Animated Water Jet into Reservoir -->
@@ -69,16 +84,19 @@
               <span class="p-tag">P1</span>
               <div class="turbine" id="turbineP1"></div>
               <div class="pipe-stream" id="streamP1"></div>
+              <span class="field-line-label">LINE A</span>
             </div>
             <div class="pipe outflow-pipe" id="outflowP2">
               <span class="p-tag">P2</span>
               <div class="turbine" id="turbineP2"></div>
               <div class="pipe-stream" id="streamP2"></div>
+              <span class="field-line-label">LINE B</span>
             </div>
             <div class="pipe outflow-pipe" id="outflowP3">
               <span class="p-tag">P3</span>
               <div class="turbine" id="turbineP3"></div>
               <div class="pipe-stream" id="streamP3"></div>
+              <span class="field-line-label">LINE C</span>
             </div>
           </div>
 
@@ -123,17 +141,17 @@
 
           <!-- Tank Vessel Markings Ruler -->
           <div class="tank-ruler">
-            <span class="mark" style="bottom: 95%;">100%</span>
-            <span class="mark" style="bottom: 66%;">66%</span>
-            <span class="mark" style="bottom: 33%;">33%</span>
-            <span class="mark" style="bottom: 5%;">0%</span>
+            <span class="mark" style="bottom: 95%;">100% (10,000L)</span>
+            <span class="mark" style="bottom: 66%;">66% (6,600L)</span>
+            <span class="mark" style="bottom: 33%;">33% (3,300L)</span>
+            <span class="mark" style="bottom: 5%;">0% (&lt;1,000L)</span>
           </div>
         </div>
 
         <!-- Sensor Status & Fault Alert Banner -->
         <div class="sensor-status-bar" id="sensorAlertBar">
           <span class="sensor-status-dot" id="sensorHealthDot"></span>
-          <span id="sensorHealthText">Float switches healthy & plausible</span>
+          <span id="sensorHealthText">Float switches healthy &bull; Direct suction manifold</span>
         </div>
       </section>
 
@@ -142,70 +160,193 @@
         <!-- Operation Mode Pill Switcher -->
         <div class="mode-card glass-card">
           <div class="mode-header">
-            <h3>OPERATION MODE</h3>
+            <div>
+              <h3>MASTER OPERATION MODE</h3>
+              <p class="section-sub">Autonomous Schedule vs Manual Control</p>
+            </div>
             <span class="mode-status-text" id="modeBanner">MANUAL MODE</span>
           </div>
           <div class="mode-toggle-group">
             <button class="mode-btn" id="btnModeAuto" onclick="setMode(true)">AUTOMATIC</button>
             <button class="mode-btn active" id="btnModeMan" onclick="setMode(false)">MANUAL</button>
           </div>
-          <p class="mode-hint" id="modeHint">Manual overrides active. Anti-chatter cooldown protection enforced.</p>
+          <p class="mode-hint" id="modeHint">Individual motor overrides take precedence. Anti-chatter (20s) and anti-inrush stagger (3s) enforced.</p>
         </div>
 
-        <!-- Irrigation Outflow Pumps (P1 - P3) -->
+        <!-- Irrigation Outflow Pumps (P1 - P3) Industrial Faceplates -->
         <div class="pumps-grid">
-          <!-- Pump 1 -->
+          <!-- Pump 1 Faceplate -->
           <div class="pump-card glass-card" id="cardP1">
             <div class="pump-card-header">
               <div class="pump-title">
                 <span class="pump-indicator" id="indP1"></span>
-                <h4>PUMP 1</h4>
+                <div>
+                  <h4>PUMP 1 (LINE A)</h4>
+                  <span class="pump-sub-tag">GPIO 47 &bull; RELAY 1</span>
+                </div>
               </div>
-              <label class="auto-mask-check" title="Allowed in Auto Mode">
-                <input type="checkbox" id="maskP1" onchange="updateAutoMask()">
-                <span>AUTO</span>
-              </label>
-            </div>
-            <div class="pump-meta">
               <span class="status-pill" id="pillP1">IDLE / READY</span>
             </div>
-            <button class="pump-toggle-btn" id="btnP1" onclick="togglePump(1)">TOGGLE P1</button>
+
+            <!-- 3-Position Override Controller -->
+            <div class="override-panel">
+              <span class="override-label">MOTOR OVERRIDE:</span>
+              <div class="override-btn-group">
+                <button class="btn-override btn-ovr-auto active" id="ovrAutoP1" onclick="setPumpOverride(1, 'AUTO')" title="Follow automatic water level schedule">AUTO</button>
+                <button class="btn-override btn-ovr-on" id="ovrOnP1" onclick="setPumpOverride(1, 'FORCE_ON')" title="Force motor ON immediately">FORCE ON</button>
+                <button class="btn-override btn-ovr-off" id="ovrOffP1" onclick="setPumpOverride(1, 'FORCE_OFF')" title="Hard lockout - prevent motor from starting">LOCK OFF</button>
+              </div>
+            </div>
+
+            <!-- Timed Dosage Duration Selector -->
+            <div class="timed-run-row">
+              <span class="timed-label">⏱️ Duration:</span>
+              <select class="timed-select" id="durP1">
+                <option value="0">Continuous</option>
+                <option value="5">5 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+              </select>
+              <span class="timed-active-badge" id="timedBadgeP1" style="display:none;">00:00</span>
+            </div>
+
+            <!-- Feedback & Lock Countdown Meters -->
+            <div class="pump-feedback-box">
+              <div class="feedback-gauge" id="gaugeBoxP1">
+                <div class="gauge-hdr">
+                  <span class="gauge-title" id="gaugeLblP1">INTERLOCK:</span>
+                  <span class="gauge-val" id="gaugeValP1">Ready</span>
+                </div>
+                <div class="gauge-track"><div class="gauge-fill" id="gaugeFillP1" style="width:0%;"></div></div>
+              </div>
+            </div>
+
+            <!-- Bottom Action & Auto Eligibility -->
+            <div class="pump-footer">
+              <label class="auto-mask-check" title="Allowed in Auto Mode">
+                <input type="checkbox" id="maskP1" onchange="updateAutoMask()">
+                <span>AUTO MASK</span>
+              </label>
+              <button class="pump-toggle-btn" id="btnP1" onclick="togglePump(1)">START P1</button>
+            </div>
+            <div class="pump-odometer" id="odoP1">Runtime: 0h 00m &bull; Total: 0s</div>
           </div>
 
-          <!-- Pump 2 -->
+          <!-- Pump 2 Faceplate -->
           <div class="pump-card glass-card" id="cardP2">
             <div class="pump-card-header">
               <div class="pump-title">
                 <span class="pump-indicator" id="indP2"></span>
-                <h4>PUMP 2</h4>
+                <div>
+                  <h4>PUMP 2 (LINE B)</h4>
+                  <span class="pump-sub-tag">GPIO 41 &bull; RELAY 2</span>
+                </div>
               </div>
-              <label class="auto-mask-check" title="Allowed in Auto Mode">
-                <input type="checkbox" id="maskP2" onchange="updateAutoMask()">
-                <span>AUTO</span>
-              </label>
-            </div>
-            <div class="pump-meta">
               <span class="status-pill" id="pillP2">IDLE / READY</span>
             </div>
-            <button class="pump-toggle-btn" id="btnP2" onclick="togglePump(2)">TOGGLE P2</button>
+
+            <!-- 3-Position Override Controller -->
+            <div class="override-panel">
+              <span class="override-label">MOTOR OVERRIDE:</span>
+              <div class="override-btn-group">
+                <button class="btn-override btn-ovr-auto active" id="ovrAutoP2" onclick="setPumpOverride(2, 'AUTO')" title="Follow automatic water level schedule">AUTO</button>
+                <button class="btn-override btn-ovr-on" id="ovrOnP2" onclick="setPumpOverride(2, 'FORCE_ON')" title="Force motor ON immediately">FORCE ON</button>
+                <button class="btn-override btn-ovr-off" id="ovrOffP2" onclick="setPumpOverride(2, 'FORCE_OFF')" title="Hard lockout - prevent motor from starting">LOCK OFF</button>
+              </div>
+            </div>
+
+            <!-- Timed Dosage Duration Selector -->
+            <div class="timed-run-row">
+              <span class="timed-label">⏱️ Duration:</span>
+              <select class="timed-select" id="durP2">
+                <option value="0">Continuous</option>
+                <option value="5">5 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+              </select>
+              <span class="timed-active-badge" id="timedBadgeP2" style="display:none;">00:00</span>
+            </div>
+
+            <!-- Feedback & Lock Countdown Meters -->
+            <div class="pump-feedback-box">
+              <div class="feedback-gauge" id="gaugeBoxP2">
+                <div class="gauge-hdr">
+                  <span class="gauge-title" id="gaugeLblP2">INTERLOCK:</span>
+                  <span class="gauge-val" id="gaugeValP2">Ready</span>
+                </div>
+                <div class="gauge-track"><div class="gauge-fill" id="gaugeFillP2" style="width:0%;"></div></div>
+              </div>
+            </div>
+
+            <!-- Bottom Action & Auto Eligibility -->
+            <div class="pump-footer">
+              <label class="auto-mask-check" title="Allowed in Auto Mode">
+                <input type="checkbox" id="maskP2" onchange="updateAutoMask()">
+                <span>AUTO MASK</span>
+              </label>
+              <button class="pump-toggle-btn" id="btnP2" onclick="togglePump(2)">START P2</button>
+            </div>
+            <div class="pump-odometer" id="odoP2">Runtime: 0h 00m &bull; Total: 0s</div>
           </div>
 
-          <!-- Pump 3 -->
+          <!-- Pump 3 Faceplate -->
           <div class="pump-card glass-card" id="cardP3">
             <div class="pump-card-header">
               <div class="pump-title">
                 <span class="pump-indicator" id="indP3"></span>
-                <h4>PUMP 3</h4>
+                <div>
+                  <h4>PUMP 3 (LINE C)</h4>
+                  <span class="pump-sub-tag">GPIO 39 &bull; RELAY 3</span>
+                </div>
               </div>
-              <label class="auto-mask-check" title="Allowed in Auto Mode">
-                <input type="checkbox" id="maskP3" onchange="updateAutoMask()">
-                <span>AUTO</span>
-              </label>
-            </div>
-            <div class="pump-meta">
               <span class="status-pill" id="pillP3">IDLE / READY</span>
             </div>
-            <button class="pump-toggle-btn" id="btnP3" onclick="togglePump(3)">TOGGLE P3</button>
+
+            <!-- 3-Position Override Controller -->
+            <div class="override-panel">
+              <span class="override-label">MOTOR OVERRIDE:</span>
+              <div class="override-btn-group">
+                <button class="btn-override btn-ovr-auto active" id="ovrAutoP3" onclick="setPumpOverride(3, 'AUTO')" title="Follow automatic water level schedule">AUTO</button>
+                <button class="btn-override btn-ovr-on" id="ovrOnP3" onclick="setPumpOverride(3, 'FORCE_ON')" title="Force motor ON immediately">FORCE ON</button>
+                <button class="btn-override btn-ovr-off" id="ovrOffP3" onclick="setPumpOverride(3, 'FORCE_OFF')" title="Hard lockout - prevent motor from starting">LOCK OFF</button>
+              </div>
+            </div>
+
+            <!-- Timed Dosage Duration Selector -->
+            <div class="timed-run-row">
+              <span class="timed-label">⏱️ Duration:</span>
+              <select class="timed-select" id="durP3">
+                <option value="0">Continuous</option>
+                <option value="5">5 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+              </select>
+              <span class="timed-active-badge" id="timedBadgeP3" style="display:none;">00:00</span>
+            </div>
+
+            <!-- Feedback & Lock Countdown Meters -->
+            <div class="pump-feedback-box">
+              <div class="feedback-gauge" id="gaugeBoxP3">
+                <div class="gauge-hdr">
+                  <span class="gauge-title" id="gaugeLblP3">INTERLOCK:</span>
+                  <span class="gauge-val" id="gaugeValP3">Ready</span>
+                </div>
+                <div class="gauge-track"><div class="gauge-fill" id="gaugeFillP3" style="width:0%;"></div></div>
+              </div>
+            </div>
+
+            <!-- Bottom Action & Auto Eligibility -->
+            <div class="pump-footer">
+              <label class="auto-mask-check" title="Allowed in Auto Mode">
+                <input type="checkbox" id="maskP3" onchange="updateAutoMask()">
+                <span>AUTO MASK</span>
+              </label>
+              <button class="pump-toggle-btn" id="btnP3" onclick="togglePump(3)">START P3</button>
+            </div>
+            <div class="pump-odometer" id="odoP3">Runtime: 0h 00m &bull; Total: 0s</div>
           </div>
         </div>
 
@@ -214,13 +355,16 @@
           <div class="pond-info">
             <div class="pump-title">
               <span class="pump-indicator pond-ind" id="indPond"></span>
-              <h4>REMOTE POND REFILL PUMP</h4>
+              <div>
+                <h4>REMOTE POND REFILL PUMP</h4>
+                <span class="pump-sub-tag">SX1262 LoRa Node 0x03 &bull; EU868</span>
+              </div>
             </div>
-            <p class="pond-desc" id="pondDesc">Refills tank via LoRa when water drops to 0.</p>
+            <p class="pond-desc" id="pondDesc">Refills reservoir via telemetry demand packet. Auto trigger at &le; L1, cutoff at &ge; L3.</p>
           </div>
           <div class="pond-actions">
             <div class="charge-latch-badge" id="latchBadge">LATCH: IDLE</div>
-            <button class="pond-toggle-btn" id="btnPond" onclick="togglePond()">TOGGLE POND</button>
+            <button class="pond-toggle-btn" id="btnPond" onclick="togglePond()">REQUEST REFILL</button>
           </div>
         </div>
 
@@ -237,6 +381,74 @@
         </div>
       </section>
     </main>
+
+    <!-- "What Happens When & How" Hydraulic Automation Matrix -->
+    <section class="automation-matrix-card glass-card" id="automationMatrixSection">
+      <div class="matrix-card-header">
+        <div class="matrix-title-group">
+          <span class="matrix-icon">⚙️</span>
+          <div>
+            <h3>HYDRAULIC AUTOMATION MATRIX ("WHAT HAPPENS WHEN &amp; HOW")</h3>
+            <p class="matrix-sub">Firmware state-machine decision table with real-time active rule tracking</p>
+          </div>
+        </div>
+        <div class="matrix-active-tag" id="activeRuleBadge">ACTIVE: RULE 2 (MID WL)</div>
+      </div>
+
+      <div class="automation-table-wrap">
+        <table class="automation-table">
+          <thead>
+            <tr>
+              <th>OPERATIONAL TIER</th>
+              <th>WATER LEVEL</th>
+              <th>ESTIMATED VOLUME</th>
+              <th>POND REFILL (INFLOW)</th>
+              <th>OUTFLOW PUMPS (AUTO)</th>
+              <th>CONTROL ACTION &amp; SAFETY INTERLOCK</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="ruleRow1" class="rule-row">
+              <td class="rule-col-tier"><span class="rule-num">RULE 1</span> <strong>FULL RESERVOIR</strong></td>
+              <td class="rule-col-wl"><span class="badge-tag ok">LEVEL 3 (100%)</span></td>
+              <td class="rule-col-vol">~10,000 Liters</td>
+              <td class="rule-col-pond"><span class="badge-tag idle">AUTO CUTOFF (OFF)</span></td>
+              <td class="rule-col-pumps"><span class="badge-tag running">ALL 3 PUMPS (P1, P2, P3)</span></td>
+              <td class="rule-col-desc">Maximum irrigation capacity. Pond refill cut off to prevent overflow.</td>
+              <td class="rule-col-active"><span class="rule-status-badge" id="ruleBadge1">IDLE</span></td>
+            </tr>
+            <tr id="ruleRow2" class="rule-row">
+              <td class="rule-col-tier"><span class="rule-num">RULE 2</span> <strong>NOMINAL STORAGE</strong></td>
+              <td class="rule-col-wl"><span class="badge-tag active">LEVEL 2 (66%)</span></td>
+              <td class="rule-col-vol">~6,600 Liters</td>
+              <td class="rule-col-pond"><span class="badge-tag idle">STANDBY / IDLE</span></td>
+              <td class="rule-col-pumps"><span class="badge-tag running">2 PUMPS (P1, P2)</span></td>
+              <td class="rule-col-desc">Sustainable balanced flow. P3 throttled unless manually forced on.</td>
+              <td class="rule-col-active"><span class="rule-status-badge" id="ruleBadge2">IDLE</span></td>
+            </tr>
+            <tr id="ruleRow3" class="rule-row">
+              <td class="rule-col-tier"><span class="rule-num">RULE 3</span> <strong>LOW WATER</strong></td>
+              <td class="rule-col-wl"><span class="badge-tag warn">LEVEL 1 (33%)</span></td>
+              <td class="rule-col-vol">~3,300 Liters</td>
+              <td class="rule-col-pond"><span class="badge-tag ok">REFILL DEMAND ON</span></td>
+              <td class="rule-col-pumps"><span class="badge-tag running">1 PUMP (P1 ONLY)</span></td>
+              <td class="rule-col-desc">Conservation mode. Tank charges from pond via LoRa packet demand.</td>
+              <td class="rule-col-active"><span class="rule-status-badge" id="ruleBadge3">IDLE</span></td>
+            </tr>
+            <tr id="ruleRow4" class="rule-row trip-row">
+              <td class="rule-col-tier"><span class="rule-num">RULE 4</span> <strong>EMPTY / DRY RUN</strong></td>
+              <td class="rule-col-wl"><span class="badge-tag fault">LEVEL 0 (0%)</span></td>
+              <td class="rule-col-vol">&lt; 1,000 Liters</td>
+              <td class="rule-col-pond"><span class="badge-tag fault">PRIORITY CHARGE LATCH</span></td>
+              <td class="rule-col-pumps"><span class="badge-tag fault">HARD SHUTDOWN (0 PUMPS)</span></td>
+              <td class="rule-col-desc"><strong>DRY RUN EMERGENCY TRIP:</strong> All pumps locked out to protect against cavitation.</td>
+              <td class="rule-col-active"><span class="rule-status-badge" id="ruleBadge4">IDLE</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- Comprehensive Live I/O, Actuators & Parameters SCADA Inspector Matrix -->
     <section class="matrix-card glass-card" id="ioMatrixSection">
@@ -559,57 +771,196 @@
 
   <!-- Settings & Network Modal Drawer -->
   <div class="modal-backdrop" id="settingsModal">
-    <div class="modal-card glass-card">
+    <div class="modal-card glass-card" style="max-width: 680px;">
       <div class="modal-header">
-        <h2>SYSTEM & NETWORK CONFIG</h2>
+        <h2>SYSTEM CONFIGURATION &amp; OTA</h2>
         <button class="icon-btn" id="btnSettingsClose">✕</button>
       </div>
+
+      <!-- 5-Tab Navigation -->
+      <div class="settings-tabs-nav">
+        <button class="settings-tab-btn active" data-tab="tabHydr">💧 Hydraulics</button>
+        <button class="settings-tab-btn" data-tab="tabLora">📡 LoRa RF</button>
+        <button class="settings-tab-btn" data-tab="tabWifi">📶 Wi-Fi &amp; Net</button>
+        <button class="settings-tab-btn" data-tab="tabOta">⚡ Wireless OTA</button>
+        <button class="settings-tab-btn" data-tab="tabLogs">📜 Live Logs</button>
+      </div>
+
       <div class="modal-body">
-        <div class="config-section">
-          <h3>PUMP TIMINGS & TELEMETRY</h3>
-          <div class="form-row">
-            <label for="cfgRuntime">Min Runtime (ms):</label>
-            <input type="number" id="cfgRuntime" min="1000" max="300000" step="1000" value="20000">
+        <!-- Tab 1: Hydraulics & Timings -->
+        <div id="tabHydr" class="settings-tab-pane active">
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgCapacity">Reservoir Capacity (L):</label>
+              <input type="number" id="cfgCapacity" min="100" max="1000000" step="500" value="10000">
+            </div>
+            <div class="form-row">
+              <label for="cfgTrigger">Refill Trigger (Low):</label>
+              <select id="cfgTrigger">
+                <option value="0">Level 0 (Empty 0%)</option>
+                <option value="1" selected>Level 1 (Low 33%)</option>
+                <option value="2">Level 2 (Mid 66%)</option>
+              </select>
+            </div>
           </div>
-          <div class="form-row">
-            <label for="cfgCooldown">Min Cooldown (ms):</label>
-            <input type="number" id="cfgCooldown" min="5000" max="600000" step="1000" value="20000">
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgCutoff">Refill Cutoff (Full):</label>
+              <select id="cfgCutoff">
+                <option value="2">Level 2 (Mid 66%)</option>
+                <option value="3" selected>Level 3 (Full 100%)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label for="cfgTelem">Telemetry Interval (ms):</label>
+              <input type="number" id="cfgTelem" min="2000" max="300000" step="1000" value="30000">
+            </div>
           </div>
-          <div class="form-row">
-            <label for="cfgTelem">Telemetry Interval (ms):</label>
-            <input type="number" id="cfgTelem" min="2000" max="300000" step="1000" value="30000">
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgRuntime">Min Runtime (ms):</label>
+              <input type="number" id="cfgRuntime" min="1000" max="300000" step="1000" value="20000">
+            </div>
+            <div class="form-row">
+              <label for="cfgCooldown">Min Cooldown (ms):</label>
+              <input type="number" id="cfgCooldown" min="5000" max="600000" step="1000" value="20000">
+            </div>
           </div>
-          <div class="form-row checkbox-row">
+          <div class="form-row checkbox-row" style="margin-top:8px;">
             <label for="cfgBootAuto">Default Boot Mode:</label>
             <select id="cfgBootAuto">
               <option value="0">Manual Mode</option>
               <option value="1">Automatic Mode</option>
             </select>
           </div>
+          <div class="modal-actions" style="margin-top:14px;">
+            <button class="btn btn-primary" onclick="saveHydraulicsConfig()">SAVE HYDRAULICS</button>
+          </div>
         </div>
 
-        <div class="config-section">
-          <h3>ALWAYS-AVAILABLE WEB & WI-FI</h3>
+        <!-- Tab 2: LoRa RF Tuning -->
+        <div id="tabLora" class="settings-tab-pane">
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgLoraFreq">Carrier Frequency (Hz):</label>
+              <input type="number" id="cfgLoraFreq" min="150000000" max="960000000" step="100000" value="868100000">
+            </div>
+            <div class="form-row">
+              <label for="cfgLoraPwr">TX Power (dBm, 2..22):</label>
+              <input type="number" id="cfgLoraPwr" min="-9" max="22" step="1" value="14">
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgLoraSf">Spreading Factor (SF):</label>
+              <select id="cfgLoraSf">
+                <option value="7">SF7 (Fast / High Data Rate)</option>
+                <option value="8">SF8</option>
+                <option value="9" selected>SF9 (Balanced Default)</option>
+                <option value="10">SF10</option>
+                <option value="11">SF11</option>
+                <option value="12">SF12 (Longest Range / Penetration)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label for="cfgLoraBw">Bandwidth (kHz):</label>
+              <select id="cfgLoraBw">
+                <option value="125" selected>125 kHz (Standard EU868)</option>
+                <option value="250">250 kHz</option>
+                <option value="500">500 kHz</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgLoraCr">Coding Rate (CR):</label>
+              <select id="cfgLoraCr">
+                <option value="5" selected>4/5 (Standard FEC)</option>
+                <option value="6">4/6</option>
+                <option value="7">4/7</option>
+                <option value="8">4/8 (Maximum FEC Protection)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label for="cfgLoraSync">Sync Word (Hex):</label>
+              <input type="text" id="cfgLoraSync" value="0x1424">
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgLoraLdro">Low Data Rate Optimize (LDRO):</label>
+              <select id="cfgLoraLdro">
+                <option value="0" selected>Auto (Mandatory on SF11/SF12 @ 125kHz)</option>
+                <option value="1">Force Enabled (Always ON)</option>
+                <option value="2">Force Disabled (Always OFF)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>Active Demodulator LDRO:</label>
+              <div id="ldroLiveBadge" class="badge-tag idle" style="margin-top:6px; display:inline-block; font-size:11px;">LDRO: INACTIVE</div>
+            </div>
+          </div>
+          <div class="modal-actions" style="margin-top:14px;">
+            <button class="btn btn-primary" onclick="saveLoraConfig()">APPLY &amp; SAVE LORA RF</button>
+          </div>
+        </div>
+
+        <!-- Tab 3: Wi-Fi & Network -->
+        <div id="tabWifi" class="settings-tab-pane">
           <div class="form-row checkbox-row">
             <label for="cfgAlwaysOn">Auto-Start Web on Boot:</label>
             <input type="checkbox" id="cfgAlwaysOn" checked>
           </div>
-          <p class="section-help">When enabled, the Web Server and SoftAP automatically initialize on every startup without needing Serial commands.</p>
+          <p class="section-help">When enabled, the Web Server and SoftAP automatically initialize on boot.</p>
           <div class="form-row">
             <label for="cfgStaSsid">Home Wi-Fi (SSID):</label>
-            <input type="text" id="cfgStaSsid" placeholder="Optional Home Router SSID">
+            <input type="text" id="cfgStaSsid" placeholder="Link2">
           </div>
           <div class="form-row">
             <label for="cfgStaPass">Home Wi-Fi Password:</label>
-            <input type="password" id="cfgStaPass" placeholder="Optional Router Password">
+            <input type="password" id="cfgStaPass" placeholder="Horvat2017">
           </div>
-          <p class="section-help">Allows accessing this dashboard directly via <code>http://tanknode.local</code> on your home network.</p>
+          <p class="section-help">Access dashboard via <code>http://tanknode.local</code> on your home router.</p>
+          <div class="modal-actions" style="margin-top:14px;">
+            <button class="btn btn-primary" onclick="saveWifiConfig()">SAVE WI-FI CONFIG</button>
+            <button class="btn btn-secondary" onclick="restoreDefaults()">RESTORE DEFAULTS</button>
+            <button class="btn btn-danger" onclick="rebootDevice()">REBOOT ESP32</button>
+          </div>
         </div>
 
-        <div class="modal-actions">
-          <button class="btn btn-primary" onclick="saveConfiguration()">SAVE & PERSIST TO FLASH</button>
-          <button class="btn btn-secondary" onclick="restoreDefaults()">RESTORE DEFAULTS</button>
-          <button class="btn btn-danger" onclick="rebootDevice()">REBOOT ESP32</button>
+        <!-- Tab 4: Wireless OTA Flashing -->
+        <div id="tabOta" class="settings-tab-pane">
+          <p class="section-help">Flash new compiled firmware wirelessly over Wi-Fi without any USB cable connection.</p>
+          <div style="background:rgba(0,0,0,0.3); border:1px dashed var(--border); border-radius:10px; padding:16px; text-align:center; margin-bottom:12px;">
+            <div style="font-size:1.8rem; margin-bottom:6px;">🚀</div>
+            <h4 style="color:#fff; margin-bottom:4px; font-family:var(--font-mono);">Browser Direct Upload</h4>
+            <p style="font-size:0.75rem; color:var(--muted); margin-bottom:12px;">Select compiled <code>firmware.bin</code></p>
+            <input type="file" id="otaFileInput" accept=".bin" style="margin-bottom:10px;">
+            <div class="prog-bar" id="otaProgressBar" style="display:none;"><div class="prog-fill" id="otaProgressFill"></div></div>
+            <div id="otaUploadStatus" style="font-family:var(--font-mono); font-size:0.72rem; color:var(--cyan); margin-bottom:8px;"></div>
+            <button class="btn btn-primary" style="width:100%;" onclick="uploadOtaFirmware()">FLASH FIRMWARE NOW</button>
+          </div>
+          <div style="padding:10px; border-radius:8px; background:rgba(0,240,255,0.06); border:1px solid rgba(0,240,255,0.2); font-family:var(--font-mono); font-size:0.72rem;">
+            <strong>ArduinoOTA Command-Line Flashing:</strong><br>
+            Run: <code>pio run -e esp32s3_Bazin_ota -t upload</code><br>
+            Port: <code>3232</code> &bull; Host: <span id="otaHostSta">tanknode.local</span>
+          </div>
+        </div>
+
+        <!-- Tab 5: Live Event Logs -->
+        <div id="tabLogs" class="settings-tab-pane">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn" style="padding:2px 8px;font-size:0.65rem;" onclick="filterLogs('ALL')">ALL</button>
+              <button class="btn" style="padding:2px 8px;font-size:0.65rem;" onclick="filterLogs('LORA')">LORA</button>
+              <button class="btn" style="padding:2px 8px;font-size:0.65rem;" onclick="filterLogs('PUMP')">PUMP</button>
+              <button class="btn" style="padding:2px 8px;font-size:0.65rem;" onclick="filterLogs('HYDR')">HYDR</button>
+              <button class="btn" style="padding:2px 8px;font-size:0.65rem;" onclick="filterLogs('WIFI')">WIFI</button>
+              <button class="btn" style="padding:2px 8px;font-size:0.65rem;" onclick="filterLogs('OTA')">OTA</button>
+            </div>
+            <button class="btn btn-danger" style="padding:2px 8px;font-size:0.65rem;" onclick="clearLogs()">Clear</button>
+          </div>
+          <div id="logConsoleBox" class="log-box"></div>
         </div>
       </div>
     </div>

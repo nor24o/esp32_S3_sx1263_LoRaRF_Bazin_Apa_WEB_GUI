@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SX1302 LoRa Multi-Node Fleet SCADA Deck</title>
+  <style>
+    :root {
+      --bg-dark: #0a0e17;
+      --card-bg: #111827;
+      --card-sim: #0d1726;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-sim: rgba(14, 165, 233, 0.3);
+      --cyan: #0ea5e9;
+      --cyan-glow: rgba(14, 165, 233, 0.25);
+      --green: #10b981;
+      --green-glow: rgba(16, 185, 129, 0.25);
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --purple: #8b5cf6;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg-dark);
+      color: var(--text);
+      font-family: var(--font-sans);
+      padding: 18px 24px;
+      min-height: 100vh;
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(14, 165, 233, 0.05) 0%, transparent 45%),
+        radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.04) 0%, transparent 45%),
+        linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+    }
+
+    /* Top HUD Navigation Bar */
+    .hud-bar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 22px;
+      margin-bottom: 20px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08);
+      gap: 14px;
+    }
+    .brand-box { display: flex; align-items: center; gap: 14px; }
+    .brand-icon {
+      width: 38px; height: 38px; border-radius: 10px;
+      background: linear-gradient(135deg, rgba(0,240,255,0.2) 0%, rgba(16,185,129,0.2) 100%);
+      border: 1px solid var(--cyan);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.25rem; box-shadow: 0 0 16px var(--cyan-glow);
+    }
+    .brand-text h1 {
+      font-family: var(--font-mono);
+      font-size: 1.15rem;
+      letter-spacing: 0.08em;
+      color: #fff;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .brand-text p { font-size: 0.72rem; color: var(--muted); margin-top: 2px; font-family: var(--font-mono); }
+    .hud-metrics { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .hud-badge {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.74rem;
+      font-family: var(--font-mono);
+      color: var(--cyan);
+      display: flex; align-items: center; gap: 6px;
+    }
+    .pulse-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green); box-shadow: 0 0 10px var(--green);
+      animation: pulse 1.4s infinite alternate ease-in-out;
+    }
+    @keyframes pulse { from { opacity: 0.35; transform: scale(0.9); } to { opacity: 1; transform: scale(1.15); } }
+
+    /* Action Buttons */
+    .btn {
+      background: rgba(0, 240, 255, 0.1);
+      border: 1px solid var(--border);
+      color: #fff;
+      padding: 7px 12px;
+      border-radius: 7px;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex; align-items: center; gap: 6px;
+      transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .btn:hover { background: rgba(0, 240, 255, 0.22); border-color: var(--cyan); transform: translateY(-1px); box-shadow: 0 4px 12px var(--cyan-glow); }
+    .btn-green { background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); color: #34d399; }
+    .btn-green:hover { background: rgba(16, 185, 129, 0.3); border-color: var(--green); box-shadow: 0 4px 12px var(--green-glow); color: #fff; }
+    .btn-red { background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.4); color: #f87171; }
+    .btn-red:hover { background: rgba(239, 68, 68, 0.3); border-color: var(--red); box-shadow: 0 4px 12px rgba(239,68,68,0.3); color: #fff; }
+    .btn-amber { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.4); color: #fbbf24; }
+    .btn-amber:hover { background: rgba(245, 158, 11, 0.3); border-color: var(--amber); box-shadow: 0 4px 12px rgba(245,158,11,0.3); color: #fff; }
+
+    /* Alarms Drawer */
+    #alarmContainer { margin-bottom: 20px; display: none; }
+    .alarm-card {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 16px; border-radius: 10px; margin-bottom: 8px;
+      font-family: var(--font-mono); font-size: 0.76rem;
+      animation: alertSlide 0.3s ease;
+    }
+    @keyframes alertSlide { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+    .alarm-critical { background: rgba(239, 68, 68, 0.16); border: 1px solid var(--red); color: #fca5a5; }
+    .alarm-warning { background: rgba(245, 158, 11, 0.16); border: 1px solid var(--amber); color: #fde68a; }
+
+    /* Multi-Node SCADA Grid */
+    .section-header {
+      display: flex; justify-content: space-between; align-items: center;
+      font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted);
+      letter-spacing: 0.08em; margin-bottom: 12px; text-transform: uppercase;
+    }
+    .grid-nodes {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 18px;
+      margin-bottom: 22px;
+    }
+    .node-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      display: flex; flex-direction: column; justify-content: space-between;
+      position: relative; overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .node-card.sim-node { border-color: var(--border-sim); background: var(--card-sim); }
+    .card-top {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 14px; padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .node-id-chip {
+      font-family: var(--font-mono); font-size: 0.7rem; font-weight: 700;
+      padding: 2px 7px; border-radius: 5px;
+      background: rgba(0, 240, 255, 0.12); color: var(--cyan);
+      border: 1px solid var(--border);
+    }
+    .node-title { font-size: 1.02rem; font-weight: 700; color: #fff; margin-top: 3px; }
+    .node-subtitle { font-size: 0.7rem; color: var(--muted); font-family: var(--font-mono); }
+
+    .tag-pill {
+      padding: 3px 8px; border-radius: 6px;
+      font-size: 0.68rem; font-weight: 700; font-family: var(--font-mono);
+      letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .tag-online { background: rgba(16, 185, 129, 0.18); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.4); }
+    .tag-sim { background: rgba(0, 240, 255, 0.18); color: var(--cyan); border: 1px solid rgba(0, 240, 255, 0.4); }
+    .tag-offline { background: rgba(255, 255, 255, 0.05); color: var(--muted); border: 1px solid rgba(255, 255, 255, 0.08); }
+    .tag-alert { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.5); }
+
+    /* Reservoir Graphics & Vessel Simulation */
+    .tank-stage {
+      display: flex; gap: 16px; align-items: center;
+      background: rgba(0, 0, 0, 0.35); padding: 12px;
+      border-radius: 12px; border: 1px solid rgba(255,255,255,0.05);
+      margin-bottom: 12px;
+    }
+    .tank-glass-vessel {
+      width: 70px; height: 110px;
+      border: 2px solid #334155; border-radius: 8px;
+      background: rgba(0, 0, 0, 0.6); position: relative;
+      overflow: hidden; flex-shrink: 0;
+      box-shadow: inset 0 0 14px rgba(0,0,0,0.8);
+    }
+    .tank-water-mass {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      background: linear-gradient(180deg, rgba(0,240,255,0.85) 0%, rgba(2,132,199,0.92) 100%);
+      transition: height 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .tank-water-wave {
+      position: absolute; top: -4px; left: 0; right: 0; height: 8px;
+      background: rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      animation: waveMove 2s infinite alternate ease-in-out;
+    }
+    @keyframes waveMove { from { transform: scaleY(0.7); } to { transform: scaleY(1.3); } }
+
+    /* Buoy Sensor Markers inside Tank */
+    .buoy-marker {
+      position: absolute; right: 4px; display: flex; align-items: center; gap: 4px;
+      font-family: var(--font-mono); font-size: 0.6rem;
+    }
+    .buoy-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #475569; border: 1px solid #1e293b;
+    }
+    .buoy-dot.active { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+    /* Turbine Animation in Pond Node */
+    .turbine-box {
+      width: 44px; height: 44px; border-radius: 50%;
+      background: rgba(0,0,0,0.4); border: 2px solid rgba(16,185,129,0.3);
+      display: flex; align-items: center; justify-content: center;
+      position: relative; flex-shrink: 0;
+    }
+    .turbine-blades {
+      font-size: 1.4rem; color: var(--green);
+      transition: transform 0.2s;
+    }
+    .turbine-blades.spinning {
+      animation: spinBlades 0.8s linear infinite;
+    }
+    @keyframes spinBlades { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* Details Rows */
+    .tele-grid { display: flex; flex-direction: column; gap: 7px; font-family: var(--font-mono); font-size: 0.74rem; }
+    .tele-row { display: flex; justify-content: space-between; align-items: center; }
+    .tele-k { color: var(--muted); }
+    .tele-v { font-weight: 700; color: #fff; }
+
+    /* Outflow Relay Cards */
+    .relay-matrix { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+    .relay-item {
+      display: flex; justify-content: space-between; align-items: center;
+      background: rgba(255,255,255,0.03); padding: 5px 9px;
+      border-radius: 7px; border: 1px solid rgba(255,255,255,0.05);
+    }
+    .relay-tag { font-weight: 700; font-family: var(--font-mono); color: #fff; font-size: 0.75rem; }
+
+    /* Accord Banner */
+    .accord-banner {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-radius: 8px;
+      font-family: var(--font-mono); font-size: 0.74rem;
+      margin-bottom: 10px;
+    }
+    .accord-ok { background: rgba(16, 185, 129, 0.12); border: 1px solid var(--green); color: var(--green); }
+    .accord-pending { background: rgba(245, 158, 11, 0.14); border: 1px solid var(--amber); color: var(--amber); }
+
+    /* Local Station Panel Box */
+    .local-panel {
+      margin-top: 10px; padding: 10px 12px;
+      background: rgba(16, 185, 129, 0.05);
+      border-radius: 9px; border: 1px solid rgba(16, 185, 129, 0.22);
+    }
+
+    /* Actions Bottom Bar */
+    .card-actions {
+      display: flex; flex-wrap: wrap; gap: 7px;
+      margin-top: 14px; padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+
+    /* Trend Chart Card */
+    .chart-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 20px;
+      margin-bottom: 22px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    }
+    .chart-svg-box {
+      width: 100%; overflow-x: auto;
+      background: rgba(0,0,0,0.3); border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.05);
+      padding: 12px 6px 6px 6px;
+    }
+
+    /* Command Console Bar */
+    .cmd-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 20px;
+      margin-bottom: 22px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    }
+    .cmd-bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .cmd-input {
+      flex: 1; background: rgba(0,0,0,0.4);
+      border: 1px solid var(--border); border-radius: 7px;
+      padding: 8px 14px; color: #fff;
+      font-family: var(--font-mono); font-size: 0.78rem;
+    }
+    .cmd-input:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 10px var(--cyan-glow); }
+    .chip-group { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip {
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 5px; padding: 3px 8px; font-size: 0.68rem; font-family: var(--font-mono);
+      color: var(--muted); cursor: pointer; transition: 0.15s;
+    }
+    .chip:hover { color: var(--cyan); border-color: var(--cyan); background: rgba(0,240,255,0.08); }
+
+    /* Packet Stream Table */
+    .packet-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 20px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    }
+    .tab-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .tab-btn {
+      background: transparent; border: none; color: var(--muted);
+      font-family: var(--font-mono); font-size: 0.74rem; padding: 4px 10px;
+      border-bottom: 2px solid transparent; cursor: pointer;
+    }
+    .tab-btn.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+    .table-box { width: 100%; overflow-x: auto; max-height: 280px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.72rem; }
+    th { text-align: left; padding: 8px 10px; color: var(--muted); border-bottom: 1px solid rgba(255,255,255,0.08); position: sticky; top: 0; background: #0c1424; }
+    td { padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+    tr:hover { background: rgba(255,255,255,0.02); }
+
+    /* Toast Notification */
+    .toast-box {
+      position: fixed; bottom: 24px; right: 24px;
+      background: #0f172a; color: #fff;
+      border: 1px solid var(--cyan); border-radius: 8px;
+      padding: 10px 18px; font-family: var(--font-mono); font-size: 0.75rem;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.7); display: none; z-index: 999;
+      animation: toastIn 0.25s ease;
+    }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body>
+
+  <!-- Top HUD Bar -->
+  <header class="hud-bar">
+    <div class="brand-box">
+      <div class="brand-icon">⚡</div>
+      <div class="brand-text">
+        <h1>SX1302 LORA FLEET SCADA <span style="font-size:0.7rem;color:var(--cyan);font-weight:normal;">DECK v2.4</span></h1>
+        <p>UNIVERSAL MULTI-NODE TELEMETRY &amp; HYDRAULIC CONTROL COORDINATOR</p>
+      </div>
+    </div>
+    <div class="hud-metrics">
+      <div class="hud-badge"><span class="pulse-dot"></span><span id="gwIp">Gateway: Waiting...</span></div>
+      <div class="hud-badge"><span>PACKETS:</span> <strong id="pktCount" style="color:#fff;">#0</strong></div>
+      <div class="hud-badge"><span>NODES:</span> <strong id="nodeCount" style="color:#fff;">0</strong></div>
+      <div class="hud-badge"><span style="color:var(--green);">RF:</span> 868.100 MHz</div>
+      <div class="hud-badge"><span style="color:var(--purple);">💾 DB:</span> <strong id="dbBadge" style="color:#fff;">SQLITE WAL</strong></div>
+      <button class="btn" onclick="sendCmd('/nodes prune')">🧹 Prune Ghost Nodes</button>
+      <button class="btn btn-green" onclick="refreshData()">🔄 Refresh</button>
+    </div>
+  </header>
+
+  <!-- Live Dynamic Alarms Banner -->
+  <div id="alarmContainer"></div>
+
+  <!-- Multi-Node SCADA Fleet Grid -->
+  <div class="section-header">
+    <span>🌐 ACTIVE REGISTERED FLEET NODES</span>
+    <span>DISPERSION BUS // 868.100 MHZ</span>
+  </div>
+  <div class="grid-nodes" id="nodeGrid">
+    <div style="color:var(--muted);font-family:var(--font-mono);font-size:0.8rem;padding:20px;">Connecting to Gateway Concentrator at UDP :5555...</div>
+  </div>
+
+  <!-- Inter-Node Hydraulic Correlations & Rules Matrix -->
+  <div class="chart-card">
+    <div class="section-header" style="margin-bottom:8px;">
+      <span>🔗 INTER-NODE HYDRAULIC CORRELATIONS &amp; CONSENSUS MATRIX (SQLITE DB)</span>
+      <span style="font-size:0.7rem;color:var(--muted);">Automated Hydraulic Interlocks &amp; Consensus Triggers</span>
+    </div>
+    <div class="table-box" style="max-height:220px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Link (Src → Tgt)</th>
+            <th>Relation Type</th>
+            <th>Condition &amp; Action Formula</th>
+            <th>Accord</th>
+            <th>Triggers</th>
+            <th>Last Fired</th>
+          </tr>
+        </thead>
+        <tbody id="corrBody">
+          <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:14px;">Loading correlation rules from database...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Universal Fleet Devices & RF Modulation Registry -->
+  <div class="chart-card">
+    <div class="section-header" style="margin-bottom:8px;">
+      <span>🗄️ UNIVERSAL FLEET DEVICE &amp; RF MODULATION DATABASE (`gateway_fleet.db`)</span>
+      <span style="font-size:0.7rem;color:var(--muted);">Dynamic SF / Bandwidth Demodulation &amp; Health</span>
+    </div>
+    <div class="table-box" style="max-height:240px;">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Device Name</th>
+            <th>Hardware / Role</th>
+            <th>RF Modulation</th>
+            <th>Demodulator (LDRO)</th>
+            <th>RF Signal</th>
+            <th>Packets</th>
+            <th>Status</th>
+            <th>Last Seen</th>
+          </tr>
+        </thead>
+        <tbody id="devBody">
+          <tr><td colspan="9" style="text-align:center;color:var(--muted);padding:14px;">Loading fleet device database...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Real-Time Dual-Axis SCADA Telemetry Trend Chart -->
+  <div class="chart-card">
+    <div class="section-header" style="margin-bottom:8px;">
+      <span>📈 REAL-TIME DUAL-AXIS HYDRAULIC TELEMETRY (10s RESOLUTION)</span>
+      <span style="font-size:0.7rem;color:var(--muted);"><span style="color:var(--cyan)">■ Tank Level %</span> &nbsp;|&nbsp; <span style="color:var(--green)">--- Pond Level %</span> &nbsp;|&nbsp; <span style="color:var(--amber)">■ Inflow Pump Running</span></span>
+    </div>
+    <div class="chart-svg-box">
+      <svg id="trendSvg" viewBox="0 0 960 180" style="width:100%;height:auto;display:block"></svg>
+    </div>
+  </div>
+
+  <!-- Universal Command Console Deck -->
+  <div class="cmd-card">
+    <div class="section-header" style="margin-bottom:6px;">
+      <span>⚡ UNIVERSAL COMMAND CONSOLE</span>
+      <span style="font-size:0.7rem;color:var(--muted)">LoRa RF Downlinks via UDP :5556</span>
+    </div>
+    <div class="cmd-bar">
+      <input type="text" id="cmdInput" class="cmd-input" placeholder="Enter station command (e.g. /tank status, /tank pond toggle, /pond local start, /pond local stop, /nodes prune)" onkeydown="if(event.key==='Enter') executeCmd()">
+      <button class="btn" onclick="executeCmd()">EXECUTE</button>
+      <button class="btn btn-green" onclick="sendCmd('/gui')">LAUNCH GUI</button>
+    </div>
+    <div class="chip-group">
+      <span style="font-size:0.68rem;color:var(--muted);font-family:var(--font-mono);padding-top:4px;">Quick Actions:</span>
+      <span class="chip" onclick="sendCmd('/tank pond toggle')">/tank pond toggle</span>
+      <span class="chip" onclick="sendCmd('/tank mode toggle')">/tank mode toggle</span>
+      <span class="chip" onclick="sendCmd('/tank p1 toggle')">/tank p1 toggle</span>
+      <span class="chip" onclick="sendCmd('/pond local stop')">🛑 /pond local stop</span>
+      <span class="chip" onclick="sendCmd('/pond local start')">▶️ /pond local start</span>
+      <span class="chip" onclick="sendCmd('/pond sim tx')">📡 /pond sim tx</span>
+      <span class="chip" onclick="sendCmd('/nodes prune')">🧹 /nodes prune</span>
+      <span class="chip" onclick="sendCmd('/status')">ℹ️ /status</span>
+    </div>
+  </div>
+
+  <!-- Live Decoded LoRa RF Packet Stream -->
+  <div class="packet-card">
+    <div class="section-header" style="margin-bottom:8px;">
+      <span>📡 LIVE DECODED LORA RF PACKET STREAM</span>
+      <div class="tab-row" id="pktTabs">
+        <button class="tab-btn active" onclick="setFilter('ALL')">ALL PACKETS</button>
+        <button class="tab-btn" onclick="setFilter('STATUS')">TELEMETRY STATUS</button>
+        <button class="tab-btn" onclick="setFilter('CMD')">COMMANDS</button>
+        <button class="tab-btn" onclick="setFilter('SIM')">SIMULATOR</button>
+      </div>
+    </div>
+    <div class="table-box">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Type</th>
+            <th>Sender → Target</th>
+            <th>Decoded Metrics / Handshake Summary</th>
+            <th>Raw Payload HEX</th>
+          </tr>
+        </thead>
+        <tbody id="pktBody">
+          <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px;">Waiting for incoming packets from gateway...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="toast-box" id="toast"></div>
+
+  <script>
+    let activeFilter = 'ALL';
+    let cachedPackets = [];
+    let d_gw_ip = '';
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 2600);
+    }
+
+    function setFilter(filt) {
+      activeFilter = filt;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+      renderPacketRows();
+    }
+
+    function sendCmd(cmdStr) {
+      fetch('/api/cmd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: cmdStr })
+      })
+      .then(r => r.json())
+      .then(d => {
+        showToast(d.msg || 'Command Dispatched');
+        refreshData();
+      })
+      .catch(e => showToast('Error sending command'));
+    }
+
+    function executeCmd() {
+      const el = document.getElementById('cmdInput');
+      const val = el.value.trim();
+      if (!val) return;
+      sendCmd(val);
+      el.value = '';
+    }
+
+    function refreshData() {
+      fetch('/api/data')
+        .then(r => r.json())
+        .then(d => {
+          if (d.gateway_ip) {
+            d_gw_ip = d.gateway_ip;
+            document.getElementById('gwIp').innerText = 'Gateway: ' + d.gateway_ip;
+          }
+          if (d.pkt_counter !== undefined) document.getElementById('pktCount').innerText = '#' + d.pkt_counter;
+          
+          if (d.db_stats) {
+            document.getElementById('dbBadge').innerText = d.db_stats.size_kb + ' KB (' + d.db_stats.packet_count + ' pkts)';
+          }
+
+          const nodes = d.nodes || {};
+          document.getElementById('nodeCount').innerText = Object.keys(nodes).length;
+
+          renderAlarms(d.alarms || []);
+          renderNodeCards(nodes, d.pond_sim || {}, d.gateway_ip);
+          renderCorrelations(d.correlations || []);
+          renderDeviceDb(d.db_devices || []);
+          renderTrendChart(d.history || []);
+
+          if (d.packets) {
+            cachedPackets = d.packets;
+            renderPacketRows();
+          }
+        })
+        .catch(e => console.warn('Fetch error:', e));
+    }
+
+    function renderCorrelations(corrs) {
+      const tbody = document.getElementById('corrBody');
+      if (!tbody) return;
+      if (!corrs || corrs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:14px;">No inter-node correlations recorded.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = corrs.map(c => {
+        const link = `<strong>0x${c.source_node_id.toString(16).toUpperCase().padStart(2, '0')}</strong> &rarr; <strong>0x${c.target_node_id.toString(16).toUpperCase().padStart(2, '0')}</strong>`;
+        const lastFired = c.last_triggered ? c.last_triggered.replace('T', ' ').substring(0, 19) : '<span style="color:var(--muted)">Never</span>';
+        const condAct = `<div><strong style="color:var(--cyan)">IF:</strong> ${c.condition_expr || c.rule_desc}</div><div><strong style="color:var(--green)">THEN:</strong> ${c.action_expr || '--'}</div>`;
+        const accordBadge = c.active_accord ? '<span class="tag-pill tag-online" style="font-size:0.62rem">ACTIVE</span>' : '<span class="tag-pill tag-offline" style="font-size:0.62rem">IDLE</span>';
+        return `
+          <tr>
+            <td>${link}</td>
+            <td><span class="tag-pill tag-sim" style="font-size:0.65rem">${c.relation_type}</span></td>
+            <td style="font-size:0.7rem">${condAct}</td>
+            <td>${accordBadge}</td>
+            <td><strong style="color:#fff">${c.trigger_count || 0}</strong></td>
+            <td>${lastFired}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderDeviceDb(devices) {
+      const tbody = document.getElementById('devBody');
+      if (!tbody) return;
+      if (!devices || devices.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:14px;">No devices in database.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = devices.map(d => {
+        const nidHex = '0x' + d.node_id.toString(16).toUpperCase().padStart(2, '0');
+        const ldroTag = d.last_ldro ? '<span class="tag-pill tag-online" style="font-size:0.62rem">LDRO ON (&ge;16ms)</span>' : '<span class="tag-pill tag-offline" style="font-size:0.62rem">OFF</span>';
+        const rfMod = `<strong style="color:var(--cyan)">SF${d.last_sf || 9}</strong> / ${d.last_bw_khz || 125} kHz (${(d.last_freq_hz/1e6).toFixed(3)} MHz)`;
+        const sig = d.last_rssi !== null ? `${d.last_rssi} dBm <span style="color:var(--muted)">(${d.last_snr} dB)</span>` : '<span style="color:var(--muted)">--</span>';
+        const isSim = Boolean(d.is_simulated);
+        const statTag = isSim ? '<span class="tag-pill tag-sim">SIMULATED</span>' : (d.status === 'ONLINE' ? '<span class="tag-pill tag-online">ONLINE</span>' : '<span class="tag-pill tag-offline">OFFLINE</span>');
+        const lastSeen = d.last_seen ? d.last_seen.replace('T', ' ').substring(0, 19) : '--';
+        return `
+          <tr>
+            <td><span class="node-id-chip">${nidHex}</span></td>
+            <td><strong>${d.name}</strong></td>
+            <td><span style="font-size:0.68rem;color:var(--muted)">${d.type}</span> &bull; <span>${d.hardware || 'ESP32-S3'}</span></td>
+            <td>${rfMod}</td>
+            <td>${ldroTag}</td>
+            <td>${sig}</td>
+            <td><strong style="color:#fff">${d.pkt_count || 0}</strong></td>
+            <td>${statTag}</td>
+            <td>${lastSeen}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderPacketRows() {
+      const tbody = document.getElementById('pktBody');
+      if (!cachedPackets || cachedPackets.length === 0) return;
+
+      let filtered = cachedPackets.slice().reverse();
+      if (activeFilter === 'STATUS') filtered = filtered.filter(p => p.type.includes('STATUS'));
+      else if (activeFilter === 'CMD') filtered = filtered.filter(p => p.type.includes('CMD'));
+      else if (activeFilter === 'SIM') filtered = filtered.filter(p => p.type.includes('SIM'));
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px;">No packets matching filter "${activeFilter}"</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map(p => {
+        const isSim = p.type.includes('SIM');
+        const isStatus = p.type.includes('STATUS');
+        const badgeClass = isSim ? 'tag-sim' : (isStatus ? 'tag-online' : 'tag-alert');
+        return `
+          <tr>
+            <td>${p.time}</td>
+            <td><span class="tag-pill ${badgeClass}">${p.type}</span></td>
+            <td><strong>${p.sender}</strong> → <strong>${p.target}</strong></td>
+            <td>${p.summary}</td>
+            <td style="color:var(--muted)">${p.hex}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderAlarms(alarms) {
+      const el = document.getElementById('alarmContainer');
+      if (!el) return;
+      if (!alarms || alarms.length === 0) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+      }
+      el.style.display = 'block';
+      el.innerHTML = alarms.map(a => {
+        const isCrit = (a.level === 'CRITICAL');
+        const cardCls = isCrit ? 'alarm-critical' : 'alarm-warning';
+        return `
+          <div class="alarm-card ${cardCls}">
+            <span class="pulse-dot" style="background:${isCrit ? 'var(--red)' : 'var(--amber)'};box-shadow:0 0 8px ${isCrit ? 'var(--red)' : 'var(--amber)'}"></span>
+            <div style="flex:1">
+              <strong>${a.title}</strong> — <span>${a.msg}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderTrendChart(history) {
+      const svg = document.getElementById('trendSvg');
+      if (!svg) return;
+      const W = 960, H = 180;
+      const padL = 45, padR = 25, padT = 24, padB = 28;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+
+      let svgContent = `
+        <defs>
+          <linearGradient id="tankGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#00f0ff" stop-opacity="0.38"/>
+            <stop offset="100%" stop-color="#00f0ff" stop-opacity="0.0"/>
+          </linearGradient>
+        </defs>
+      `;
+
+      [0, 25, 50, 75, 100].forEach(pct => {
+        const y = padT + plotH - (pct / 100.0 * plotH);
+        svgContent += `
+          <line x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,0.07)" stroke-dasharray="3,3" />
+          <text x="${padL - 8}" y="${(y + 3).toFixed(1)}" font-family="monospace" font-size="9" fill="#64748b" text-anchor="end">${pct}%</text>
+        `;
+      });
+
+      if (!history || history.length < 2) {
+        svgContent += `<text x="${W/2}" y="${H/2 + 4}" text-anchor="middle" font-family="monospace" font-size="12" fill="#64748b">Collecting real-time 10s telemetry data points...</text>`;
+        svg.innerHTML = svgContent;
+        return;
+      }
+
+      const n = history.length;
+      const stepX = plotW / (n - 1);
+      const tankPts = [];
+      const pondPts = [];
+      let pumpBars = '';
+
+      history.forEach((pt, i) => {
+        const x = padL + i * stepX;
+        const tankY = padT + plotH - ((pt.tank_pct || 0) / 100.0 * plotH);
+        const pondY = padT + plotH - ((pt.pond_pct !== undefined ? pt.pond_pct : 50) / 100.0 * plotH);
+        tankPts.push({ x, y: tankY });
+        pondPts.push({ x, y: pondY });
+
+        if (pt.pond_pump) {
+          const barW = Math.max(5, stepX);
+          pumpBars += `<rect x="${(x - barW/2).toFixed(1)}" y="${(padT + plotH - 12).toFixed(1)}" width="${barW.toFixed(1)}" height="12" fill="rgba(245,158,11,0.5)" rx="2"/>`;
+        }
+      });
+
+      svgContent += pumpBars;
+
+      const areaD = `M ${tankPts[0].x.toFixed(1)} ${(padT + plotH).toFixed(1)} ` +
+                    tankPts.map(p => `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ') +
+                    ` L ${tankPts[tankPts.length - 1].x.toFixed(1)} ${(padT + plotH).toFixed(1)} Z`;
+      svgContent += `<path d="${areaD}" fill="url(#tankGrad)" />`;
+
+      const pondLineD = 'M ' + pondPts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' L ');
+      svgContent += `<path d="${pondLineD}" fill="none" stroke="#10b981" stroke-width="2" stroke-dasharray="5,3" />`;
+
+      const tankLineD = 'M ' + tankPts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' L ');
+      svgContent += `<path d="${tankLineD}" fill="none" stroke="#00f0ff" stroke-width="2.5" />`;
+
+      const lastTank = tankPts[tankPts.length - 1];
+      const lastPond = pondPts[pondPts.length - 1];
+      svgContent += `<circle cx="${lastTank.x.toFixed(1)}" cy="${lastTank.y.toFixed(1)}" r="4.5" fill="#00f0ff" stroke="#fff" stroke-width="1.5" />`;
+      svgContent += `<circle cx="${lastPond.x.toFixed(1)}" cy="${lastPond.y.toFixed(1)}" r="3.5" fill="#10b981" stroke="#fff" stroke-width="1.2" />`;
+
+      const timeIndices = [0, Math.floor(n / 2), n - 1];
+      timeIndices.forEach(idx => {
+        const pt = history[idx];
+        const x = padL + idx * stepX;
+        const anchor = idx === 0 ? "start" : (idx === n - 1 ? "end" : "middle");
+        svgContent += `<text x="${x.toFixed(1)}" y="${(H - 6).toFixed(1)}" font-family="monospace" font-size="9" fill="#64748b" text-anchor="${anchor}">${pt.time || ''}</text>`;
+      });
+
+      svg.innerHTML = svgContent;
+    }
+
+    function renderNodeCards(nodes, pondSim, currentGwIp) {
+      const container = document.getElementById('nodeGrid');
+      let html = '';
+
+      const sortedKeys = Object.keys(nodes).map(Number).sort((a, b) => {
+        const order = { 2: 1, 3: 2, 1: 3 };
+        return (order[a] || (a + 10)) - (order[b] || (b + 10));
+      });
+
+      for (const nid of sortedKeys) {
+        const n = nodes[nid];
+        const isTank = (nid === 2);
+        const isPond = (nid === 3);
+        const isGateway = (nid === 1);
+        const m = n.metrics || {};
+
+        let cardClass = n.is_simulated ? 'node-card sim-node' : 'node-card';
+        let statusTag = `<span class="tag-pill tag-offline">${n.status}</span>`;
+        if (n.status === 'ONLINE') statusTag = `<span class="tag-pill tag-online">ONLINE</span>`;
+        if (n.status === 'SIMULATED') statusTag = `<span class="tag-pill tag-sim">SIMULATOR ACTIVE</span>`;
+        if (n.status === 'TIMEOUT') statusTag = `<span class="tag-pill tag-alert">TIMEOUT</span>`;
+
+        html += `<div class="${cardClass}"><div>`;
+        html += `
+          <div class="card-top">
+            <div>
+              <span class="node-id-chip">${n.id_hex}</span>
+              <div class="node-title">${n.name}</div>
+              <div class="node-subtitle">${n.role}</div>
+            </div>
+            ${statusTag}
+          </div>
+        `;
+
+        if (isTank) {
+          const wl = m.water_level !== undefined ? m.water_level : 0;
+          const heights = [0, 33, 66, 100];
+          const labels = ['0/3 (EMPTY)', '1/3 (LOW 33%)', '2/3 (MID 66%)', '3/3 (FULL 100%)'];
+          const estLiters = [0, 3300, 6600, 10000];
+          const isAuto = Boolean(m.auto_mode);
+          const pondDem = Boolean(m.pond_demand);
+
+          html += `
+            <div class="tank-stage">
+              <div class="tank-glass-vessel">
+                <div class="tank-water-mass" style="height: ${heights[wl] || 0}%;">
+                  <div class="tank-water-wave"></div>
+                </div>
+                <div class="buoy-marker" style="bottom: 78%;">
+                  <div class="buoy-dot ${wl >= 3 ? 'active' : ''}"></div>
+                  <span style="color:${wl >= 3 ? 'var(--green)' : 'var(--muted)'}">L3</span>
+                </div>
+                <div class="buoy-marker" style="bottom: 48%;">
+                  <div class="buoy-dot ${wl >= 2 ? 'active' : ''}"></div>
+                  <span style="color:${wl >= 2 ? 'var(--green)' : 'var(--muted)'}">L2</span>
+                </div>
+                <div class="buoy-marker" style="bottom: 18%;">
+                  <div class="buoy-dot ${wl >= 1 ? 'active' : ''}"></div>
+                  <span style="color:${wl >= 1 ? 'var(--green)' : 'var(--muted)'}">L1</span>
+                </div>
+              </div>
+              <div class="tele-grid" style="flex:1;">
+                <div class="tele-row"><span class="tele-k">Capacity Level:</span><span class="tele-v" style="color:var(--cyan);font-size:0.85rem">${labels[wl]}</span></div>
+                <div class="tele-row"><span class="tele-k">Est. Reservoir:</span><span class="tele-v">~${estLiters[wl]} L / 10,000 L</span></div>
+                <div class="tele-row"><span class="tele-k">Operating Mode:</span><span class="tag-pill ${isAuto ? 'tag-online' : 'tag-alert'}">${isAuto ? 'AUTO' : 'MANUAL'}</span></div>
+                <div class="tele-row"><span class="tele-k">Pond Demand:</span><span class="tag-pill ${pondDem ? 'tag-online' : 'tag-offline'}">${pondDem ? 'DEMAND ON' : 'IDLE'}</span></div>
+                <div class="tele-row"><span class="tele-k">Auto Refill:</span><span style="color:var(--green);font-size:0.68rem">ON &le; 1/3 &rarr; OFF &ge; 3/3</span></div>
+                <div class="tele-row"><span class="tele-k">PSRAM Cache:</span><span class="tag-pill" style="background:rgba(168,85,247,0.15);color:var(--purple);border:1px solid rgba(168,85,247,0.4)">2048 KB ACTIVE</span></div>
+              </div>
+            </div>
+
+            <!-- Outflow Relays P1-P3 with Industrial Overrides -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <span style="font-size:0.72rem;font-weight:bold;color:var(--muted);font-family:var(--font-mono)">3x PARALLEL OUTFLOW PUMPS (NO CHECK VALVES):</span>
+              <span class="tag-pill" style="font-size:0.65rem;background:rgba(0,240,255,0.12);color:var(--cyan);border:1px solid var(--border)">RULE ${m.active_rule || (wl===0?4:(wl===1?3:(wl===2?2:1)))} ACTIVE</span>
+            </div>
+            <div class="relay-matrix">
+              ${[1, 2, 3].map(idx => {
+                const isOn = Boolean(m['p' + idx]);
+                const allowed = m['allowed_p' + idx];
+                const rLeft = (m.run_left && m.run_left[idx-1]) || 0;
+                const cLeft = (m.cd_left && m.cd_left[idx-1]) || 0;
+                const ovr = (m.overrides && m.overrides[idx-1]) || 0;
+                const tLeft = (m.timed_left && m.timed_left[idx-1]) || 0;
+
+                let ovrTag = `<span class="tag-pill" style="font-size:0.62rem;background:rgba(0,240,255,0.12);color:var(--cyan);border:1px solid var(--border)">AUTO</span>`;
+                if (ovr === 1) {
+                  ovrTag = `<span class="tag-pill tag-online" style="font-size:0.62rem;box-shadow:0 0 6px rgba(16,185,129,0.3)">FORCE ON</span>`;
+                } else if (ovr === 2) {
+                  ovrTag = `<span class="tag-pill tag-alert" style="font-size:0.62rem;background:rgba(239,68,68,0.2);color:#fca5a5;border-color:var(--red)">LOCK OFF</span>`;
+                }
+
+                let lockTag = `<span class="tag-pill tag-online" style="font-size:0.62rem;padding:2px 5px">⚡ READY</span>`;
+                if (tLeft > 0) {
+                  const tm = Math.floor(tLeft/60);
+                  const ts = tLeft%60;
+                  lockTag = `<span class="tag-pill" style="font-size:0.62rem;padding:2px 5px;background:rgba(0,240,255,0.18);border:1px solid var(--cyan);color:var(--cyan);animation:pulse 1s infinite alternate">⏱️ ${tm}:${ts<10?'0':''}${ts}</span>`;
+                } else if (rLeft > 0) {
+                  lockTag = `<span class="tag-pill tag-alert" style="font-size:0.62rem;padding:2px 5px;background:rgba(245,158,11,0.15);border-color:var(--amber);color:var(--amber)">⏳ RUN: ${rLeft}s</span>`;
+                } else if (cLeft > 0) {
+                  lockTag = `<span class="tag-pill tag-alert" style="font-size:0.62rem;padding:2px 5px;background:rgba(0,240,255,0.12);border-color:var(--cyan);color:var(--cyan)">❄️ CD: ${cLeft}s</span>`;
+                }
+
+                return `
+                  <div class="relay-item">
+                    <div style="display:flex;align-items:center;gap:6px">
+                      <span class="relay-tag">P${idx}</span>
+                      <span class="tag-pill ${isOn ? 'tag-online' : 'tag-offline'}" style="font-size:0.62rem">${isOn ? 'ON' : 'OFF'}</span>
+                      ${ovrTag}
+                      <span style="font-size:0.62rem;color:var(--muted)">${allowed !== undefined ? (allowed ? 'M:✓' : 'M:✗') : ''}</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:4px">
+                      ${lockTag}
+                      <button class="btn" style="padding:2px 6px;font-size:0.62rem" onclick="sendCmd('/tank p${idx} toggle')">Toggle</button>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+
+            <!-- Diagnostics -->
+            <div class="tele-grid" style="margin-top:10px;">
+              <div class="tele-row"><span class="tele-k">Sensor Hub:</span><span class="tele-v">${m.temp_c !== undefined ? m.temp_c + ' °C / ' + m.humidity + ' % RH' : '--'}</span></div>
+              <div class="tele-row"><span class="tele-k">RF Modulation:</span><span class="tag-pill" style="font-size:0.65rem;background:rgba(14,165,233,0.15);color:var(--cyan);border:1px solid rgba(14,165,233,0.4)">SF${n.last_sf || 9} / ${n.last_bw_khz || 125} kHz${n.last_ldro ? ' [LDRO ON]' : ''}</span></div>
+              <div class="tele-row"><span class="tele-k">RF Signal:</span><span class="tele-v">${n.last_rssi !== null ? n.last_rssi + ' dBm (SNR ' + n.last_snr + ' dB)' : 'No RF signal'}</span></div>
+              <div class="tele-row"><span class="tele-k">Tank Portal:</span><span class="tele-v"><a href="http://tanknode.local" target="_blank" style="color:var(--cyan);text-decoration:none;font-weight:bold;">🌐 Open Web Portal (http://tanknode.local)</a></span></div>
+            </div>
+          `;
+        } else if (isPond) {
+          const pr = pondSim.pump_running;
+          const accord = (pondSim.tank_accord !== undefined) ? pondSim.tank_accord : true;
+          const retryCnt = pondSim.accord_retry_count || 0;
+
+          html += `
+            <div class="accord-banner ${accord ? 'accord-ok' : 'accord-pending'}">
+              <span class="pulse-dot" style="background:${accord ? 'var(--green)' : 'var(--amber)'};box-shadow:0 0 8px ${accord ? 'var(--green)' : 'var(--amber)'}"></span>
+              <div>
+                <strong>${accord ? '🤝 COMMON ACCORD' : `⚠️ AWAITING ACCORD [Retry #${retryCnt}]`}</strong>
+                <div style="font-size:0.68rem;opacity:0.85">${accord ? 'Tank Node (0x02) & Pond in full synchronization' : 'Handshake in progress via LoRa downlinks'}</div>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:14px;align-items:center;background:rgba(0,0,0,0.3);padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.05);margin-bottom:12px;">
+              <div class="turbine-box">
+                <div class="turbine-blades ${pr ? 'spinning' : ''}">⚙️</div>
+              </div>
+              <div class="tele-grid" style="flex:1;">
+                <div class="tele-row"><span class="tele-k">Pump Impeller:</span><span class="tag-pill ${pr ? 'tag-online' : 'tag-offline'}">${pr ? 'ENERGIZED (PUMPING)' : 'STANDBY (IDLE)'}</span></div>
+                <div class="tele-row"><span class="tele-k">Flow Capacity:</span><span class="tele-v" style="color:var(--green)">${pondSim.flow_lpm || 60.0} L/min</span></div>
+                <div class="tele-row"><span class="tele-k">Delivered:</span><span class="tele-v" style="color:#fff;font-size:0.82rem">${pondSim.total_liters || 0.0} Liters</span></div>
+              </div>
+            </div>
+
+            <div class="tele-grid">
+              <div class="tele-row"><span class="tele-k">Pond Reservoir:</span><span class="tele-v">${pondSim.pond_level_pct || 88}% Full</span></div>
+              <div class="tele-row"><span class="tele-k">Solar Array &amp; Batt:</span><span class="tele-v">${pondSim.battery_v || 12.8} V / ${pondSim.solar_w || 45} W</span></div>
+              <div class="tele-row"><span class="tele-k">RF Modulation:</span><span class="tag-pill" style="font-size:0.65rem;background:rgba(14,165,233,0.15);color:var(--cyan);border:1px solid rgba(14,165,233,0.4)">SF${n.last_sf || 9} / ${n.last_bw_khz || 125} kHz</span></div>
+              <div class="tele-row"><span class="tele-k">LoRa Downlinks:</span><span class="tag-pill ${pondSim.rf_tx_enabled ? 'tag-online' : 'tag-offline'}">${pondSim.rf_tx_enabled ? 'TRANSMITTING' : 'OFF'}</span></div>
+            </div>
+
+            <!-- Local Station Panel for Operator -->
+            <div class="local-panel">
+              <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.72rem;font-weight:bold;color:var(--green);margin-bottom:6px;font-family:var(--font-mono)">
+                <span>📍 POND LOCAL STATION PANEL (0x03)</span>
+                <span class="tag-pill tag-sim" style="font-size:0.6rem">OPERATOR</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">
+                <button class="btn btn-red" style="flex:1;min-width:130px;" onclick="sendCmd('/pond local stop')">🛑 Stop Pump (Local)</button>
+                <button class="btn btn-green" style="flex:1;min-width:130px;" onclick="sendCmd('/pond local start')">▶️ Start Pump (Local)</button>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                <button class="btn" style="flex:1;padding:4px 8px;font-size:0.68rem" onclick="sendCmd('/pond sim tx')">📡 Send Status Beacon</button>
+                <button class="btn" style="flex:1;padding:4px 8px;font-size:0.68rem" onclick="sendCmd('/pond sim toggle')">🔄 Toggle Sim</button>
+              </div>
+            </div>
+          `;
+        } else if (isGateway) {
+          html += `
+            <div class="tele-grid">
+              <div class="tele-row"><span class="tele-k">Gateway IP:</span><span class="tele-v">${currentGwIp || d_gw_ip || 'Waiting...'}</span></div>
+              <div class="tele-row"><span class="tele-k">Modulation Bus:</span><span class="tag-pill tag-sim" style="font-size:0.65rem">MULTI-SF (SF7-SF12 / 125 kHz)</span></div>
+              <div class="tele-row"><span class="tele-k">Packets Rx / Tx:</span><span class="tele-v">${m.rx_count || 0} / ${m.tx_count || 0}</span></div>
+              <div class="tele-row"><span class="tele-k">Hardware Queue:</span><span class="tele-v">${m.q_depth || 0} / 32 frames</span></div>
+              <div class="tele-row"><span class="tele-k">Radio Frequency:</span><span class="tele-v">${m.rf0_mhz || '868.1'} MHz</span></div>
+            </div>
+          `;
+        }
+
+        html += `</div>`; // Close card content
+
+        // Bottom Actions Toolbar
+        html += `<div class="card-actions">`;
+        if (isTank) {
+          const pondDem = Boolean(m.pond_demand);
+          html += `
+            <button class="btn" onclick="sendCmd('/tank mode toggle')">🔄 Mode</button>
+            <button class="btn ${pondDem ? 'btn-red' : 'btn-green'}" onclick="sendCmd('/tank pond toggle')">
+              ${pondDem ? '🛑 Cancel Refill' : '🚀 Demand Refill'}
+            </button>
+            <button class="btn" onclick="sendCmd('/tank status')">ℹ️ Status</button>
+          `;
+        } else if (isPond) {
+          html += `
+            <button class="btn btn-red" onclick="sendCmd('/pond local stop')">🛑 Stop Pump</button>
+            <button class="btn btn-green" onclick="sendCmd('/pond local start')">▶️ Start Pump</button>
+            <button class="btn" onclick="sendCmd('/pond sim tx')">📡 Beacon</button>
+          `;
+        }
+        html += `</div></div>`; // Close card
+      }
+
+      container.innerHTML = html;
+    }
+
+    setInterval(refreshData, 1200);
+    refreshData();
+  </script>
+</body>
+</html>
