@@ -32,14 +32,22 @@
 #define NODE_POND         0x03
 #define NODE_BROADCAST    0xFF
 #define MY_NODE_ID        NODE_TANK
-#define CONFIG_VERSION    42    // SF12 timing guard, accord retries, manual boost latch
+#define CONFIG_VERSION    45    // Event-Driven Zero-Spam Telemetry, Snappy Inter-Node Accord & Overhauled SCADA UI
 
 // StatusPayload flags byte (TX)
 #define STATUS_BIT_AUTO   0x01  // auto mode active
 #define STATUS_BIT_P1     0x02  // pump 1 on
 #define STATUS_BIT_P2     0x04  // pump 2 on
 #define STATUS_BIT_P3     0x08  // pump 3 on
-#define STATUS_BIT_POND   0x10  // pond virtual switch active
+#define STATUS_BIT_POND   0x10  // pond refill demand active (authoritative Tank demand)
+
+// StatusPayload reserved byte bitfield (TX)
+#define RSVD_BIT_AUTO_P1  0x01  // P1 enabled in auto mask
+#define RSVD_BIT_AUTO_P2  0x02  // P2 enabled in auto mask
+#define RSVD_BIT_AUTO_P3  0x04  // P3 enabled in auto mask
+#define RSVD_BIT_BURST    0x08  // Active burst telemetry mode active
+#define RSVD_BIT_LDRO     0x10  // Low Data Rate Optimization (LDRO) active
+#define RSVD_BIT_POND_ACK 0x20  // Remote Pond Node (0x03) confirmed running
 
 // CmdPayload target byte (RX) — which outputs to affect
 #define CMD_TARGET_MODE   0x01
@@ -56,28 +64,34 @@
 #define PUMP_OVERRIDE_AUTO        0   // Follows system automation & water level schedule
 #define PUMP_OVERRIDE_FORCE_ON    1   // Manually forced ON (indefinite or timed duration)
 #define PUMP_OVERRIDE_FORCE_OFF   2   // Manually forced OFF (locked out / inhibited)
-#define MOTOR_STAGGER_MS       3000UL // 3-second anti-inrush stagger delay between motor starts
+#define DEFAULT_MOTOR_STAGGER_MS 3000UL // Default 3-second anti-inrush stagger delay between motor starts
+#define MOTOR_STAGGER_MS         DEFAULT_MOTOR_STAGGER_MS
 
-// ─── LoRa RF parameters ───────────────────────────────────────────────────────
+// ─── LoRa RF parameters (Long-Range 700m+ & Obstacle Penetration) ────────────
 #define LORA_SPI_FREQ         16000000UL  // Hz
 #define LORA_FREQUENCY       868100000UL  // Hz — 868.1 MHz (EU868 band)
-#define LORA_TX_POWER_DBM            14
+#define LORA_TX_POWER_DBM            22   // +22 dBm max SX1262 PA output for 700m+ penetration
 #define LORA_SF                       9
 #define LORA_BW                  125000UL // Hz
 #define LORA_CR                       5
 #define LORA_SYNC_WORD           0x1424
 #define LORA_PREAMBLE_LEN             8
 #define LORA_MAX_PAYLOAD            255
+#define LDRO_AUTO_THRESHOLD_MS     16.0f  // Enforce LDRO when symbol time T_sym = 2^SF / BW >= 16.0 ms
 
 // ─── Defaults for LoRa RF Configuration ───────────────────────────────────────
 #define DEFAULT_LORA_FREQ_HZ           868100000UL
-#define DEFAULT_LORA_TX_POWER_DBM             14
+#define DEFAULT_LORA_TX_POWER_DBM             22
 #define DEFAULT_LORA_SF                        9
 #define DEFAULT_LORA_BW_KHZ                  125
 #define DEFAULT_LORA_CR                        5
-#define DEFAULT_LORA_LDRO                      0  // 0 = Auto (Symbol >= 16.38ms enables LDRO), 1 = Force ON, 2 = Force OFF
+#define DEFAULT_LORA_LDRO                      0  // 0 = Auto (T_sym >= 16.0ms enables LDRO), 1 = Force ON, 2 = Force OFF
 #define DEFAULT_LORA_SYNC_WORD            0x1424
 #define DEFAULT_LORA_PREAMBLE_LEN              8
+
+// ─── Defaults for Hardware CAD / Listen-Before-Talk (LBT) ─────────────────────
+#define DEFAULT_LBT_RETRIES                    4  // Up to 4 CAD retries on channel busy before TX
+#define DEFAULT_LBT_BACKOFF_MS               60UL // Base LBT jitter backoff in ms (scaled by SF symbol time)
 
 // ─── Defaults for Hydraulic & Reservoir Capacity ──────────────────────────────
 #define DEFAULT_TANK_CAPACITY_LITERS       10000UL
@@ -94,16 +108,19 @@
 #define DEFAULT_WIFI_STA_SSID          "Link2"
 #define DEFAULT_WIFI_STA_PASS          "Horvat2017"
 
-// ─── Default runtime config ───────────────────────────────────────────────────
-#define DEFAULT_PUMP_MIN_RUNTIME_MS    20000UL  
-#define DEFAULT_PUMP_MIN_COOLDOWN_MS   20000UL  
-#define DEFAULT_TELEMETRY_INTERVAL_MS  30000UL  // 30s heartbeat (immediate TX on state change)
-#define DEFAULT_NETWORK_TIMEOUT_MS     60000UL  
+// ─── Default Runtime & Dual-Rate Event-Driven Telemetry Config ────────────────
+#define DEFAULT_PUMP_MIN_RUNTIME_MS    20000UL  // 20s minimum pump run lock
+#define DEFAULT_PUMP_MIN_COOLDOWN_MS   20000UL  // 20s minimum pump cooldown lock
+#define DEFAULT_TELEM_IDLE_MS         600000UL  // 10 min Silent Idle Mode keepalive (10-30 min typical)
+#define DEFAULT_TELEM_BURST_MS          3000UL  // 3.0s Active Burst Mode interval (1.0s-5.0s typical)
+#define DEFAULT_TELEMETRY_INTERVAL_MS DEFAULT_TELEM_IDLE_MS
+#define BURST_SETTLE_HOLD_MS           15000UL  // Keep active burst mode for 15s after state transition settles
+#define DEFAULT_NETWORK_TIMEOUT_MS    900000UL  // 15 minutes gateway timeout
 
 // ─── Smart Auto-Refill Hysteresis ─────────────────────────────────────────────
 #define TANK_REFILL_TRIGGER_LEVEL            1  
 #define TANK_REFILL_CUTOFF_LEVEL             3  
-#define LORA_WATCHDOG_TIMEOUT_MS      600000UL  // 10 minutes without gateway packet triggers warning
+#define LORA_WATCHDOG_TIMEOUT_MS     1860000UL  // 31 minutes without gateway packet triggers warning
 
 // ─── PSRAM In-Memory Telemetry Buffer ─────────────────────────────────────────
 #define PSRAM_HISTORY_CAPACITY            1440  // 24 hours at 1 snapshot per minute
@@ -122,12 +139,32 @@
 #define ERR_FLOAT_PLAUSIBILITY 4
 
 // ─── Config field validation bounds ───────────────────────────────────────────
-#define CFG_RUNTIME_MIN_MS       1000UL
-#define CFG_RUNTIME_MAX_MS     300000UL  // 5 min maximum
-#define CFG_COOLDOWN_MIN_MS      5000UL
-#define CFG_COOLDOWN_MAX_MS    600000UL  // 10 min maximum
-#define CFG_TELEM_MIN_MS         2000UL
-#define CFG_TELEM_MAX_MS       300000UL
+#define CFG_RUNTIME_MIN_MS          1000UL
+#define CFG_RUNTIME_MAX_MS        300000UL  // 5 min maximum
+#define CFG_COOLDOWN_MIN_MS         1000UL
+#define CFG_COOLDOWN_MAX_MS       600000UL  // 10 min maximum
+#define CFG_STAGGER_MIN_MS             0UL
+#define CFG_STAGGER_MAX_MS         60000UL  // 60s maximum anti-inrush stagger
+#define CFG_TELEM_IDLE_MIN_MS       5000UL  // 5s min idle interval
+#define CFG_TELEM_IDLE_MAX_MS    3600000UL  // 60 min max idle interval
+#define CFG_TELEM_BURST_MIN_MS      1000UL  // 1.0s min burst interval
+#define CFG_TELEM_BURST_MAX_MS     60000UL  // 60.0s max burst interval
+#define CFG_TELEM_MIN_MS            1000UL
+#define CFG_TELEM_MAX_MS         3600000UL
+#define CFG_LBT_RETRIES_MIN            0
+#define CFG_LBT_RETRIES_MAX           10
+#define CFG_LBT_BACKOFF_MIN_MS        10UL
+#define CFG_LBT_BACKOFF_MAX_MS      2000UL
+#define CFG_CAPACITY_MIN_L           100UL
+#define CFG_CAPACITY_MAX_L       1000000UL
+#define CFG_LORA_FREQ_MIN_HZ   150000000UL
+#define CFG_LORA_FREQ_MAX_HZ   960000000UL
+#define CFG_LORA_PWR_MIN_DBM          -9
+#define CFG_LORA_PWR_MAX_DBM          22
+#define CFG_LORA_SF_MIN                6
+#define CFG_LORA_SF_MAX               12
+#define CFG_LORA_CR_MIN                5
+#define CFG_LORA_CR_MAX                8
 
 // ─── PCF8574 expander bit layout ──────────────────────────────────────────────
 #define PCF_FLOAT_BITS         3
@@ -162,7 +199,7 @@
 // ─── Serial console ───────────────────────────────────────────────────────────
 #define SERIAL_BAUD       921600UL
 #define BOOT_DELAY_MS       2000UL
-#define CONSOLE_BUF_LEN       64
+#define CONSOLE_BUF_LEN       96
 
 // ─── RTOS task periods ────────────────────────────────────────────────────────
 #define LORA_POLL_MS          20UL   
@@ -194,7 +231,7 @@
 
 // ─── RTOS queue depths ────────────────────────────────────────────────────────
 #define RXQUEUE_DEPTH          8
-#define TXQUEUE_DEPTH          4
+#define TXQUEUE_DEPTH          6
 
 // ─── NVS namespace and keys ───────────────────────────────────────────────────
 #define NVS_NAMESPACE    "tanknode"

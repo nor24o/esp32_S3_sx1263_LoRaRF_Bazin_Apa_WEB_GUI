@@ -67,8 +67,9 @@ HB_SIZE            = struct.calcsize(HB_FMT)
 BOOT_SIZE          = struct.calcsize(BOOT_FMT)
 
 # UDP socket & Runtime Globals
+DEFAULT_GATEWAY_IP = "192.168.1.29"
 sock            = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-gateway_ip      = None
+gateway_ip      = DEFAULT_GATEWAY_IP
 pkt_counter     = 0
 last_hb         = {}
 active_web_port = STATION_WEB_PORT
@@ -182,18 +183,18 @@ class FleetDatabase:
             );
             """)
 
-            # Seed default known network devices
+            # Seed default known network devices (Default SF11 / BW125 / LDRO=1 for 700m+ Long-Range)
             cur.execute("""
-            INSERT OR IGNORE INTO devices (node_id, name, type, role, hardware, is_simulated, last_sf, last_bw_khz, status)
-            VALUES (1, 'Gateway Coordinator', 'GATEWAY', 'SX1302 Concentrator & UDP Hub', 'SX1302 CoreCell', 0, 9, 125, 'ONLINE');
+            INSERT OR IGNORE INTO devices (node_id, name, type, role, hardware, is_simulated, last_sf, last_bw_khz, last_ldro, status)
+            VALUES (1, 'Gateway Coordinator', 'GATEWAY', 'SX1302 Concentrator & UDP Hub', 'SX1302 CoreCell', 0, 11, 125, 1, 'ONLINE');
             """)
             cur.execute("""
-            INSERT OR IGNORE INTO devices (node_id, name, type, role, hardware, is_simulated, last_sf, last_bw_khz, status)
-            VALUES (2, 'Tank Node (Bazin)', 'RESERVOIR_CTRL', 'Level Floats & 3x Outflow Relays', 'ESP32-S3 + SX1262', 0, 9, 125, 'OFFLINE');
+            INSERT OR IGNORE INTO devices (node_id, name, type, role, hardware, is_simulated, last_sf, last_bw_khz, last_ldro, status)
+            VALUES (2, 'Tank Node (Bazin)', 'RESERVOIR_CTRL', 'Level Floats & 3x Outflow Relays', 'ESP32-S3 + SX1262', 0, 11, 125, 1, 'OFFLINE');
             """)
             cur.execute("""
-            INSERT OR IGNORE INTO devices (node_id, name, type, role, hardware, is_simulated, last_sf, last_bw_khz, status)
-            VALUES (3, 'Pond Node (Iaz)', 'INFLOW_PUMP', 'Remote Pond Charging Pump & Source Monitor', 'Virtual / RF Node', 1, 9, 125, 'SIMULATED');
+            INSERT OR IGNORE INTO devices (node_id, name, type, role, hardware, is_simulated, last_sf, last_bw_khz, last_ldro, status)
+            VALUES (3, 'Pond Node (Iaz)', 'INFLOW_PUMP', 'Remote Pond Charging Pump & Source Monitor', 'Virtual / RF Node', 1, 11, 125, 1, 'SIMULATED');
             """)
 
             # Seed default inter-node hydraulic correlations
@@ -234,11 +235,11 @@ class FleetDatabase:
             """, (node_id, name, n_type, role, hardware, 1 if is_simulated else 0))
             self.conn.commit()
 
-    def touch_device(self, node_id, sf=None, bw_khz=None, freq_hz=None, rssi=None, snr=None, metrics=None):
+    def touch_device(self, node_id, sf=None, bw_khz=None, freq_hz=None, rssi=None, snr=None, cr=None, ldro=None, metrics=None):
         if node_id in (0x00, 0xFF) or node_id < 1 or node_id > 16:
             return
         with self.lock:
-            row = self.conn.execute("SELECT node_id FROM devices WHERE node_id = ?", (node_id,)).fetchone()
+            row = self.conn.execute("SELECT node_id, last_sf, last_bw_khz FROM devices WHERE node_id = ?", (node_id,)).fetchone()
             if not row:
                 name = f"Node 0x{node_id:02X}"
                 n_type = "GENERIC_NODE"
@@ -247,19 +248,32 @@ class FleetDatabase:
                 INSERT INTO devices (node_id, name, type, role, first_seen, last_seen, pkt_count, status)
                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'ONLINE')
                 """, (node_id, name, n_type, role))
+                cur_sf = sf if sf is not None else 11
+                cur_bw = bw_khz if bw_khz is not None else 125
+            else:
+                cur_sf = sf if sf is not None else (row["last_sf"] or 11)
+                cur_bw = bw_khz if bw_khz is not None else (row["last_bw_khz"] or 125)
             
             updates = ["last_seen = CURRENT_TIMESTAMP", "pkt_count = pkt_count + 1", "status = 'ONLINE'"]
             params = []
             if sf is not None:
                 updates.append("last_sf = ?")
                 params.append(sf)
-                bw = bw_khz if bw_khz is not None else 125
-                ldro_flag = 1 if ((sf >= 11 and bw <= 125) or (sf >= 12 and bw <= 250)) else 0
-                updates.append("last_ldro = ?")
-                params.append(ldro_flag)
             if bw_khz is not None:
                 updates.append("last_bw_khz = ?")
                 params.append(bw_khz)
+            if cr is not None and cr != "":
+                updates.append("last_cr = ?")
+                params.append(cr)
+            if ldro is not None:
+                updates.append("last_ldro = ?")
+                params.append(1 if ldro else 0)
+            elif sf is not None or bw_khz is not None:
+                # Automatic LDRO Engine: T_sym = 2^SF / BW_kHz >= 16.0 ms
+                t_sym_ms = (2 ** cur_sf) / float(max(1, cur_bw))
+                ldro_flag = 1 if t_sym_ms >= 16.0 else 0
+                updates.append("last_ldro = ?")
+                params.append(ldro_flag)
             if freq_hz is not None:
                 updates.append("last_freq_hz = ?")
                 params.append(freq_hz)
@@ -279,18 +293,21 @@ class FleetDatabase:
             self.conn.commit()
 
     def get_target_rf(self, node_id):
-        """Returns detected RF modulation parameters for a node, or default SF9/BW125."""
+        """Returns detected RF modulation parameters for a node, or default SF11/BW125/LDRO."""
         with self.lock:
             row = self.conn.execute("SELECT last_sf, last_bw_khz, last_freq_hz, last_cr, last_ldro FROM devices WHERE node_id = ?", (node_id,)).fetchone()
             if row:
+                sf_val = row["last_sf"] or 11
+                bw_val = row["last_bw_khz"] or 125
+                ldro_val = row["last_ldro"] if row["last_ldro"] is not None else (1 if ((2 ** sf_val) / float(max(1, bw_val))) >= 16.0 else 0)
                 return {
-                    "sf": row["last_sf"] or 9,
-                    "bw_khz": row["last_bw_khz"] or 125,
+                    "sf": sf_val,
+                    "bw_khz": bw_val,
                     "freq_hz": row["last_freq_hz"] or 868100000,
                     "cr": row["last_cr"] or "4/5",
-                    "ldro": row["last_ldro"] or 0
+                    "ldro": int(ldro_val)
                 }
-            return {"sf": 9, "bw_khz": 125, "freq_hz": 868100000, "cr": "4/5", "ldro": 0}
+            return {"sf": 11, "bw_khz": 125, "freq_hz": 868100000, "cr": "4/5", "ldro": 1}
 
     def record_telemetry(self, node_id, water_level=None, auto_mode=None, p1=None, p2=None, p3=None,
                          pond_pump=None, temp_c=None, humidity=None, battery_v=None, solar_w=None,
@@ -418,10 +435,11 @@ class NodeRegistry:
                     "pkt_count": 0,
                     "last_rssi": None,
                     "last_snr": None,
-                    "last_sf": 9,
+                    "last_sf": 11,
                     "last_bw_khz": 125,
                     "last_freq_hz": 868100000,
-                    "last_ldro": 0,
+                    "last_cr": "4/5",
+                    "last_ldro": 1,
                     "metrics": {},
                     "prev_metrics": {}
                 }
@@ -443,10 +461,11 @@ class NodeRegistry:
                     "pkt_count": 0,
                     "last_rssi": None,
                     "last_snr": None,
-                    "last_sf": 9,
+                    "last_sf": 11,
                     "last_bw_khz": 125,
                     "last_freq_hz": 868100000,
-                    "last_ldro": 0,
+                    "last_cr": "4/5",
+                    "last_ldro": 1,
                     "metrics": {},
                     "prev_metrics": {}
                 }
@@ -465,10 +484,11 @@ class NodeRegistry:
                         "pkt_count": 0,
                         "last_rssi": None,
                         "last_snr": None,
-                        "last_sf": 9,
+                        "last_sf": 11,
                         "last_bw_khz": 125,
                         "last_freq_hz": 868100000,
-                        "last_ldro": 0,
+                        "last_cr": "4/5",
+                        "last_ldro": 1,
                         "metrics": {},
                         "prev_metrics": {}
                     }
@@ -486,16 +506,18 @@ class NodeRegistry:
                         "pkt_count": 0,
                         "last_rssi": None,
                         "last_snr": None,
-                        "last_sf": 9,
+                        "last_sf": 11,
                         "last_bw_khz": 125,
                         "last_freq_hz": 868100000,
-                        "last_ldro": 0,
+                        "last_cr": "4/5",
+                        "last_ldro": 1,
                         "metrics": {},
                         "prev_metrics": {}
                     }
             return self.nodes[node_id]
 
-    def touch(self, node_id: int, rssi: float = None, snr: float = None, sf: int = None, bw_khz: int = None, freq_hz: int = None):
+    def touch(self, node_id: int, rssi: float = None, snr: float = None, sf: int = None,
+              bw_khz: int = None, freq_hz: int = None, cr: str = None, ldro: int = None):
         if node_id in (0x00, 0xFF) or node_id < 1 or node_id > 16:
             return
         with self.lock:
@@ -516,15 +538,33 @@ class NodeRegistry:
                 node["last_bw_khz"] = bw_khz
             if freq_hz is not None:
                 node["last_freq_hz"] = freq_hz
-            cur_sf = node.get("last_sf", 9)
+            if cr is not None and cr != "":
+                node["last_cr"] = cr
+            cur_sf = node.get("last_sf", 11)
             cur_bw = node.get("last_bw_khz", 125)
-            node["last_ldro"] = 1 if ((cur_sf >= 11 and cur_bw <= 125) or (cur_sf >= 12 and cur_bw <= 250)) else 0
+            if ldro is not None:
+                node["last_ldro"] = 1 if ldro else 0
+            else:
+                node["last_ldro"] = 1 if ((2 ** cur_sf) / float(max(1, cur_bw))) >= 16.0 else 0
+
+            # Mirror RF parameters to simulated Pond Node when Tank Node RF parameters change
+            if node_id == NODE_TANK and NODE_POND in self.nodes:
+                pond_node = self.nodes[NODE_POND]
+                if sf is not None:
+                    pond_node["last_sf"] = sf
+                if bw_khz is not None:
+                    pond_node["last_bw_khz"] = bw_khz
+                if freq_hz is not None:
+                    pond_node["last_freq_hz"] = freq_hz
+                if cr is not None and cr != "":
+                    pond_node["last_cr"] = cr
+                pond_node["last_ldro"] = node["last_ldro"]
 
         # Sync to persistent SQLite DB
-        fleet_db.touch_device(node_id, sf=sf, bw_khz=bw_khz, freq_hz=freq_hz, rssi=rssi, snr=snr)
-        # If Tank Node updated SF/BW, align simulated Pond Node in DB to match network SF
-        if node_id == NODE_TANK and sf is not None:
-            fleet_db.touch_device(NODE_POND, sf=sf, bw_khz=bw_khz, freq_hz=freq_hz)
+        fleet_db.touch_device(node_id, sf=sf, bw_khz=bw_khz, freq_hz=freq_hz, rssi=rssi, snr=snr, cr=cr, ldro=ldro)
+        # If Tank Node updated SF/BW/CR/LDRO, align simulated Pond Node in DB to match network RF
+        if node_id == NODE_TANK and any(x is not None for x in (sf, bw_khz, freq_hz, cr, ldro)):
+            fleet_db.touch_device(NODE_POND, sf=sf, bw_khz=bw_khz, freq_hz=freq_hz, cr=cr, ldro=node["last_ldro"])
 
     def update_metrics(self, node_id: int, metrics: dict):
         if node_id in (0x00, 0xFF) or node_id < 1 or node_id > 16:
@@ -552,11 +592,16 @@ class NodeRegistry:
             res = {}
             for nid, node in self.nodes.items():
                 copy_node = dict(node)
-                # Compute online status based on timeout if physical node
+                # Compute online status based on dual-rate timeout if physical node
                 if not copy_node["is_simulated"] and nid != NODE_GATEWAY:
+                    burst_active = copy_node.get("metrics", {}).get("burst_mode", False)
+                    pumps_active = any(copy_node.get("metrics", {}).get(p, False) for p in ("p1", "p2", "p3", "pond_demand"))
+                    # If burst mode or pumps are active: allow up to 180s (3m) before flagging timeout
+                    # In Silent Idle Mode: allow up to 1900s (31m)
+                    timeout_s = 180 if (burst_active or pumps_active) else 1900
                     if copy_node["last_seen"] == 0:
                         copy_node["status"] = "OFFLINE"
-                    elif (now - copy_node["last_seen"]) > 65:
+                    elif (now - copy_node["last_seen"]) > timeout_s:
                         copy_node["status"] = "TIMEOUT"
                     else:
                         copy_node["status"] = "ONLINE"
@@ -566,6 +611,47 @@ class NodeRegistry:
             return res
 
 node_registry = NodeRegistry()
+
+
+# ─── Dynamic LoRa Time-on-Air (ToA) & Turnaround Guard Calculator ─────────────
+
+def calc_lora_toa_s(payload_len: int, sf: int, bw_khz: int = 125, cr_str: str = "4/5", ldro: int = None) -> float:
+    """Computes LoRa packet Time-on-Air (seconds) and automatic LDRO (Tsym >= 16.0 ms)."""
+    sf = max(6, min(12, int(sf or 11)))
+    bw_khz = max(7, int(bw_khz or 125))
+    cr_denom = 5
+    if isinstance(cr_str, str) and "/" in cr_str:
+        try:
+            cr_denom = max(5, min(8, int(cr_str.split("/")[1])))
+        except Exception:
+            cr_denom = 5
+    t_sym_ms = (2 ** sf) / float(bw_khz)
+    de = (1 if ldro else 0) if ldro is not None else (1 if t_sym_ms >= 16.0 else 0)
+    t_preamble_ms = (8.0 + 4.25) * t_sym_ms
+    num = 8.0 * payload_len - 4.0 * sf + 28.0 + 16.0
+    den = 4.0 * (sf - 2.0 * de)
+    payload_symb = 8.0
+    if den > 0:
+        import math
+        c = math.ceil(num / den)
+        if c > 0:
+            payload_symb += c * cr_denom
+    return (t_preamble_ms + payload_symb * t_sym_ms) / 1000.0
+
+def get_turnaround_guard_s(node_id: int = NODE_TANK, payload_len: int = 17) -> float:
+    """Returns dynamic half-duplex turnaround guard window (1.2s - 1.8s+ for SF11/SF12)."""
+    rf = fleet_db.get_target_rf(node_id)
+    sf = rf.get("sf", 11)
+    bw = rf.get("bw_khz", 125)
+    cr = rf.get("cr", "4/5")
+    ldro = rf.get("ldro", None)
+    toa_s = calc_lora_toa_s(payload_len, sf, bw, cr, ldro)
+    guard_s = toa_s * 1.65 + 0.25
+    if sf >= 12 and guard_s < 1.85:
+        guard_s = 1.85
+    elif sf >= 11 and guard_s < 1.25:
+        guard_s = 1.25
+    return round(guard_s, 2)
 
 
 # ─── Autonomous Pond Node Simulator (0x03) ────────────────────────────────────
@@ -581,7 +667,7 @@ class PondSimulator:
         self.lock = threading.RLock()
         self.enabled = True
         self.rf_tx_enabled = True       # Broadcast real LoRa packets into the air via gateway
-        self.tx_interval_s = 30         # Periodic status broadcast interval
+        self.tx_interval_s = 120        # Periodic status broadcast interval (event-driven, low-chatter)
         self.pump_running = False
         self.pump_started_at = None
         self.total_runtime_s = 0.0
@@ -624,17 +710,13 @@ class PondSimulator:
                 self.accord_retry_count = 0
                 self._update_registry()
 
-            # First-hand notification directly to Tank Node over LoRa RF
+            # First-hand notification directly to Tank Node over LoRa RF (single snappy MSG_CMD frame)
             if notify_tank_first_hand and self.rf_tx_enabled and self.enabled:
                 safe_print(f"  🤝 [POND -> TANK FIRST-HAND] Dispatched local pump state={('ON' if running else 'OFF')} to Tank (0x02) | Awaiting Accord...")
+                self.last_tx_time = now
                 def _dispatch_first_hand(run_state, reason_text):
-                    # 1. Send direct command to align Tank's demand switch
+                    # Send 1 direct command packet to align Tank's demand switch (Tank replies with 1 MSG_STATUS)
                     send_node_cmd(NODE_POND, NODE_TANK, CMD_TARGET_POND, CMD_ACTION_SET, 1 if run_state else 0)
-                    # 2. Stagger beacon to prevent half-duplex LoRa collision at SX1302 and remote node
-                    rf = fleet_db.get_target_rf(NODE_TANK)
-                    delay_s = 2.0 if rf.get("sf", 9) >= 12 else 1.2
-                    time.sleep(delay_s)
-                    self.send_status_beacon(target_id=NODE_TANK, reason=f"First-hand: {reason_text}")
 
                 threading.Thread(target=_dispatch_first_hand, args=(running, reason), daemon=True).start()
                 self.last_accord_notify = now
@@ -667,9 +749,8 @@ class PondSimulator:
                             safe_print(f"  🔄 [ACCORD NOTIFICATION] Informing Tank Node (0x02) that Pond is locally stopped...")
                             if self.rf_tx_enabled:
                                 def _delayed_local_stop():
+                                    time.sleep(0.18)
                                     send_node_cmd(NODE_POND, NODE_TANK, CMD_TARGET_POND, CMD_ACTION_SET, 0)
-                                    time.sleep(2.0)
-                                    self.send_status_beacon(target_id=NODE_TANK, reason=f"Pond locally stopped (retry #{self.accord_retry_count})")
                                 threading.Thread(target=_delayed_local_stop, daemon=True).start()
                             self.last_accord_notify = time.time()
                         else:
@@ -682,9 +763,8 @@ class PondSimulator:
                             safe_print(f"\n  ⚠️ [ACCORD HANDSHAKE #{self.accord_retry_count}/3] Tank demands refill, but Pond water level is critically low ({self.pond_level_pct:.1f}% < 20%)!")
                             if self.rf_tx_enabled:
                                 def _delayed_low_cutoff():
+                                    time.sleep(0.18)
                                     send_node_cmd(NODE_POND, NODE_TANK, CMD_TARGET_POND, CMD_ACTION_SET, 0)
-                                    time.sleep(2.0)
-                                    self.send_status_beacon(target_id=NODE_TANK, reason="Pond reservoir low cutoff")
                                 threading.Thread(target=_delayed_low_cutoff, daemon=True).start()
                             self.last_accord_notify = time.time()
                     else:
@@ -695,8 +775,7 @@ class PondSimulator:
                         self.accord_retry_count = 0
                         if self.rf_tx_enabled:
                             def _delayed_accord_ack():
-                                rf = fleet_db.get_target_rf(NODE_TANK)
-                                time.sleep(0.8 if rf.get("sf", 9) >= 12 else 0.4)
+                                time.sleep(0.18)
                                 self.send_status_beacon(target_id=NODE_TANK, reason="Tank refill accord ack")
                             threading.Thread(target=_delayed_accord_ack, daemon=True).start()
                         safe_print(f"  🤝 [COMMON ACCORD REACHED] Tank Node (0x02) & Pond Node (0x03) in full agreement! (Pond Pump: RUNNING)\n")
@@ -717,8 +796,8 @@ class PondSimulator:
                             self.tank_accord = True
                             self.accord_retry_count = 0
                             safe_print(f"\n  ℹ️ [LOCAL OVERRIDE] Pond pump running by local operator command while Tank demand is idle.\n")
-                    elif self.pump_started_at and (now - self.pump_started_at < 15.0):
-                        # Grace window: pump was energized < 15s ago, do not immediately shut down on in-flight telemetry
+                    elif self.pump_started_at and (now - self.pump_started_at < 6.0):
+                        # Grace window: pump was energized < 6s ago, do not immediately shut down on in-flight telemetry
                         safe_print(f"\n  ⏳ [ACCORD GRACE] Pond pump started {now - self.pump_started_at:.1f}s ago - holding state for Tank sync...\n")
                     else:
                         # Tank refill satisfied -> STOP PUMP!
@@ -728,8 +807,7 @@ class PondSimulator:
                         self.accord_retry_count = 0
                         if self.rf_tx_enabled:
                             def _delayed_stop_ack():
-                                rf = fleet_db.get_target_rf(NODE_TANK)
-                                time.sleep(0.8 if rf.get("sf", 9) >= 12 else 0.4)
+                                time.sleep(0.18)
                                 self.send_status_beacon(target_id=NODE_TANK, reason="Tank stop accord ack")
                             threading.Thread(target=_delayed_stop_ack, daemon=True).start()
                         safe_print(f"  🤝 [COMMON ACCORD REACHED] Tank Node (0x02) & Pond Node (0x03) in full agreement! (Pond Pump: STOPPED)\n")
@@ -824,16 +902,18 @@ class PondSimulator:
         # Dynamic RF Modulation Adaptation based on target device profile in DB
         rf_target_id = target_id if target_id not in (0x00, 0xFF) else NODE_TANK
         rf = fleet_db.get_target_rf(rf_target_id)
-        target_sf = rf.get("sf", 9)
+        target_sf = rf.get("sf", 11)
         target_bw = rf.get("bw_khz", 125)
         target_freq = rf.get("freq_hz", 868_100_000)
         target_cr = rf.get("cr", "4/5")
+        target_ldro = rf.get("ldro", 1)
 
-        tx_json = build_custom(bytes(payload), freq=target_freq, power=14, sf=target_sf, bw=target_bw, cr=target_cr, invert=True)
+        tx_json = build_custom(bytes(payload), freq=target_freq, power=22, sf=target_sf, bw=target_bw, cr=target_cr, ldro=target_ldro, invert=True)
         success = send(tx_json)
         if success:
-            ldro_str = " [LDRO]" if rf.get("ldro") else ""
-            safe_print(f"  📡 [POND SIM -> RF TX | SF{target_sf}BW{target_bw}{ldro_str}] Broadcasted MSG_STATUS via LoRa ({reason}) | Pump={'ON' if self.pump_running else 'OFF'} Level={self.pond_level_pct}%")
+            ldro_str = " [LDRO]" if target_ldro else ""
+            toa_ms = int(calc_lora_toa_s(len(payload), target_sf, target_bw, target_cr, target_ldro) * 1000)
+            safe_print(f"  📡 [POND SIM -> RF TX | SF{target_sf}BW{target_bw}{ldro_str} | ToA:{toa_ms}ms] Broadcasted MSG_STATUS via LoRa ({reason}) | Pump={'ON' if self.pump_running else 'OFF'} Level={self.pond_level_pct}%")
             # Record in packet history
             record_packet_history("MSG_STATUS (SIM)", f"0x{NODE_POND:02X}", f"0x{target_id:02X}",
                                   f"Pond Sim Beacon (SF{target_sf}): Pump={'ON' if self.pump_running else 'OFF'} Lvl={self.pond_level_pct}% Batt={self.battery_v}V",
@@ -884,28 +964,26 @@ def record_packet_history(pkt_type: str, sender: str, target: str, summary: str,
 # ─── Downlink JSON Builders & Sockets ─────────────────────────────────────────
 
 def build_default(payload: bytes) -> bytes:
-    data_b64 = base64.b64encode(payload).decode('utf-8')
-    pkt = {
-        "imme": True,
-        "freq": 868.1,
-        "rfch": 0,
-        "powe": 14,
-        "modu": "LORA",
-        "datr": "SF9BW125",
-        "codr": "4/5",
-        "ipol": True,
-        "ncrc": False,
-        "size": len(payload),
-        "data": data_b64
-    }
-    return json.dumps(pkt).encode('utf-8')
+    rf = fleet_db.get_target_rf(NODE_TANK)
+    return build_custom(
+        payload,
+        freq=rf.get("freq_hz", 868_100_000),
+        power=22,
+        sf=rf.get("sf", 11),
+        bw=rf.get("bw_khz", 125),
+        cr=rf.get("cr", "4/5"),
+        ldro=rf.get("ldro", 1),
+        invert=True
+    )
 
-def build_custom(payload: bytes, freq=868_100_000, power=14, sf=9,
-                 bw=125, cr="4/5", invert=True, no_crc=False,
+def build_custom(payload: bytes, freq=868_100_000, power=22, sf=11,
+                 bw=125, cr="4/5", ldro=None, invert=True, no_crc=False,
                  imme=True, rfch=0, modu="LORA") -> bytes:
     freq_mhz = freq / 1e6
     data_b64 = base64.b64encode(payload).decode('utf-8')
     datr_str = f"SF{sf}BW{bw}" if modu == "LORA" else str(sf)
+    if ldro is None:
+        ldro = 1 if ((2 ** int(sf)) / float(max(1, int(bw)))) >= 16.0 else 0
     pkt = {
         "imme": imme,
         "freq": round(freq_mhz, 4),
@@ -914,6 +992,7 @@ def build_custom(payload: bytes, freq=868_100_000, power=14, sf=9,
         "modu": modu,
         "datr": datr_str,
         "codr": cr,
+        "ldro": bool(ldro),
         "ipol": invert,
         "ncrc": no_crc,
         "size": len(payload),
@@ -932,23 +1011,25 @@ def send_node_cmd(sender_id: int, target_id: int, target_byte: int, action_byte:
     """
     Universal Command Dispatcher:
     Sends an 8-byte MSG_CMD frame over LoRa RF from ANY sender to ANY target.
-    Dynamically targets the exact spreading factor and bandwidth detected for target_id.
+    Dynamically targets the exact spreading factor, bandwidth, coding rate, and LDRO detected for target_id.
     """
     rf = fleet_db.get_target_rf(target_id if target_id not in (0x00, 0xFF) else NODE_TANK)
-    target_sf = rf.get("sf", 9)
+    target_sf = rf.get("sf", 11)
     target_bw = rf.get("bw_khz", 125)
     target_freq = rf.get("freq_hz", 868_100_000)
     target_cr = rf.get("cr", "4/5")
+    target_ldro = rf.get("ldro", 1)
 
     pkt = bytearray([0x6B, 0x5A, target_id, sender_id, MSG_CMD, target_byte, action_byte, val_byte])
-    tx_json = build_custom(bytes(pkt), freq=target_freq, power=14, sf=target_sf, bw=target_bw, cr=target_cr, invert=True)
+    tx_json = build_custom(bytes(pkt), freq=target_freq, power=22, sf=target_sf, bw=target_bw, cr=target_cr, ldro=target_ldro, invert=True)
     if send(tx_json):
         t_name = {0x01: "MODE", 0x02: "P1", 0x04: "P2", 0x08: "P3", 0x10: "POND_PUMP"}.get(target_byte, f"0x{target_byte:02X}")
         a_name = "TOGGLE" if action_byte == 0 else ("SET ON" if val_byte == 1 else "SET OFF")
-        ldro_str = " [LDRO]" if rf.get("ldro") else ""
-        safe_print(f"  [TX -> 0x{target_id:02X} | SF{target_sf}BW{target_bw}{ldro_str}] Cmd from 0x{sender_id:02X}: {t_name} -> {a_name}")
+        ldro_str = " [LDRO]" if target_ldro else ""
+        toa_ms = int(calc_lora_toa_s(len(pkt), target_sf, target_bw, target_cr, target_ldro) * 1000)
+        safe_print(f"  [TX -> 0x{target_id:02X} | SF{target_sf}BW{target_bw}{ldro_str} | ToA:{toa_ms}ms] Cmd from 0x{sender_id:02X}: {t_name} -> {a_name}")
         record_packet_history("MSG_CMD (TX)", f"0x{sender_id:02X}", f"0x{target_id:02X}",
-                              f"Cmd: {t_name} -> {a_name} (SF{target_sf})", bytes(pkt).hex().upper())
+                              f"Cmd: {t_name} -> {a_name} (SF{target_sf}{ldro_str})", bytes(pkt).hex().upper())
         fleet_db.log_packet("DOWNLINK", sender_id, target_id, MSG_CMD, "MSG_CMD",
                             f"Cmd: {t_name} -> {a_name}", sf=target_sf, bw_khz=target_bw, freq_mhz=target_freq/1e6,
                             payload_hex=bytes(pkt).hex().upper(), stat_str="TX")
@@ -959,7 +1040,8 @@ def send_node_cmd(sender_id: int, target_id: int, target_byte: int, action_byte:
 # ─── Universal Payload Decoders & Parsers ─────────────────────────────────────
 
 def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float = None,
-                          sf: int = 9, bw_khz: int = 125, freq_hz: int = 868100000, stat_str: str = "CRC_OK"):
+                          sf: int = 11, bw_khz: int = 125, freq_hz: int = 868100000,
+                          codr: str = "4/5", stat_str: str = "CRC_OK"):
     if len(payload_bytes) < 5:
         return None
         
@@ -979,9 +1061,15 @@ def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float =
     if msg_type not in (MSG_STATUS, MSG_CMD, 0x03):
         return None
 
+    # Detect reported LDRO from Tank StatusPayload.reserved (bit 4 = 0x10) if available
+    reported_ldro = None
+    if len(payload_bytes) >= 11 and sender_id == NODE_TANK:
+        reported_ldro = 1 if (payload_bytes[10] & 0x10) else 0
+
     # Touch both nodes in the registry (filter broadcast/null) with detected RF modulation parameters
     if sender_id not in (0x00, 0xFF):
-        node_registry.touch(sender_id, rssi=rssi, snr=snr, sf=sf, bw_khz=bw_khz, freq_hz=freq_hz)
+        node_registry.touch(sender_id, rssi=rssi, snr=snr, sf=sf, bw_khz=bw_khz,
+                            freq_hz=freq_hz, cr=codr or "4/5", ldro=reported_ldro)
     if target_id not in (0x00, 0xFF):
         node_registry.touch(target_id)
 
@@ -1009,6 +1097,9 @@ def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float =
         allowed_p1 = bool(reserved & 0x01) if sender_id == NODE_TANK else None
         allowed_p2 = bool(reserved & 0x02) if sender_id == NODE_TANK else None
         allowed_p3 = bool(reserved & 0x04) if sender_id == NODE_TANK else None
+        burst_mode = bool(reserved & 0x08) if sender_id == NODE_TANK else None
+        ldro_active = bool(reserved & 0x10) if sender_id == NODE_TANK else bool(((2 ** sf) / float(max(1, bw_khz))) >= 16.0)
+        pond_ack_rx = bool(reserved & 0x20) if sender_id == NODE_TANK else None
 
         run_left = [0, 0, 0]
         cd_left  = [0, 0, 0]
@@ -1033,6 +1124,8 @@ def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float =
                 deltas.append(f"P3: {'ON' if prev.get('p3') else 'OFF'} -> {'ON' if p3 else 'OFF'}")
             if prev.get("pond_demand") is not None and prev.get("pond_demand") != pond_flag:
                 deltas.append(f"PondDemand: {'ON' if prev.get('pond_demand') else 'OFF'} -> {'ON' if pond_flag else 'OFF'}")
+            if sender_id == NODE_TANK and prev.get("burst_mode") is not None and prev.get("burst_mode") != burst_mode:
+                deltas.append(f"TelemRate: {'BURST' if prev.get('burst_mode') else 'IDLE'} -> {'BURST' if burst_mode else 'IDLE'}")
 
         # Update node registry
         metrics_dict = {
@@ -1042,12 +1135,15 @@ def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float =
             "pond_demand": pond_flag,
             "temp_c": round(temp_raw / 10.0, 1),
             "humidity": humidity,
-            "flags": flags
+            "flags": flags,
+            "ldro_active": ldro_active
         }
         if sender_id == NODE_TANK:
             metrics_dict["allowed_p1"] = allowed_p1
             metrics_dict["allowed_p2"] = allowed_p2
             metrics_dict["allowed_p3"] = allowed_p3
+            metrics_dict["burst_mode"] = burst_mode
+            metrics_dict["pond_ack"] = pond_ack_rx
             metrics_dict["run_left"] = run_left
             metrics_dict["cd_left"]  = cd_left
         node_registry.update_metrics(sender_id, metrics_dict)
@@ -1055,13 +1151,22 @@ def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float =
         # Consensus Accord Protocol Verification between Tank (0x02) and Pond (0x03)
         if sender_id == NODE_TANK:
             pond_sim.check_tank_accord(tank_pond_flag=pond_flag)
+            # If Tank reports demand=pond_flag, Pond is already in sync, but Tank hasn't yet seen Pond's ACK (pond_ack_rx != pond_sim.pump_running), send 1 snappy ACK
+            if pond_ack_rx is not None and (pond_ack_rx != pond_sim.pump_running) and (pond_flag == pond_sim.pump_running):
+                if pond_sim.rf_tx_enabled and (time.time() - pond_sim.last_tx_time > 1.5):
+                    def _sync_ack():
+                        time.sleep(0.18)
+                        pond_sim.send_status_beacon(target_id=NODE_TANK, reason="Sync Tank Pond-ACK bit")
+                    threading.Thread(target=_sync_ack, daemon=True).start()
 
+        rate_tag = ("BURST" if burst_mode else "IDLE") if sender_id == NODE_TANK else "SIM"
+        ldro_tag = "LDRO" if ldro_active else "NO-LDRO"
         record_packet_history("MSG_STATUS", f"0x{sender_id:02X}", f"0x{target_id:02X}",
-                              f"Lvl={water}/3 Auto={int(auto_mode)} Relays=[{int(p1)},{int(p2)},{int(p3)}] Locks=[Run:{run_left},Cd:{cd_left}] {temp_raw/10.0:.1f}°C (SF{sf})",
+                              f"Lvl={water}/3 Auto={int(auto_mode)} Relays=[{int(p1)},{int(p2)},{int(p3)}] [{rate_tag}|{ldro_tag}] {temp_raw/10.0:.1f}°C (SF{sf})",
                               payload_bytes.hex().upper())
 
         # Persist packet and telemetry into SQLite Database
-        summary_str = f"Lvl={water}/3 Auto={int(auto_mode)} Relays=[{int(p1)},{int(p2)},{int(p3)}] {temp_raw/10.0:.1f}°C"
+        summary_str = f"Lvl={water}/3 Auto={int(auto_mode)} Relays=[{int(p1)},{int(p2)},{int(p3)}] [{rate_tag}|{ldro_tag}] {temp_raw/10.0:.1f}°C"
         fleet_db.log_packet("UPLINK", sender_id, target_id, MSG_STATUS, "MSG_STATUS",
                             summary_str, sf=sf, bw_khz=bw_khz, freq_mhz=freq_hz/1e6,
                             payload_hex=payload_bytes.hex().upper(), rssi=rssi, snr=snr, stat_str=stat_str)
@@ -1078,7 +1183,7 @@ def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float =
             if pond_flag:
                 fleet_db.trigger_correlation(NODE_TANK, NODE_POND, "HYDRAULIC_REFILL_DEMAND")
 
-        extra_info = f" (Auto Allowed: P1={int(allowed_p1)} P2={int(allowed_p2)} P3={int(allowed_p3)})" if sender_id == NODE_TANK else ""
+        extra_info = f" (Mask:[{int(allowed_p1)},{int(allowed_p2)},{int(allowed_p3)}] Rate:{'BURST' if burst_mode else 'IDLE'} LDRO:{'ON' if ldro_active else 'OFF'})" if sender_id == NODE_TANK else ""
         lock_info = f" | RunLock={run_left}s CdLock={cd_left}s" if sender_id == NODE_TANK else ""
         result.extend([
             f"  │   Type       = MSG_STATUS ({len(payload_bytes)} bytes)",
@@ -1129,10 +1234,9 @@ def decode_device_payload(payload_bytes: bytes, rssi: float = None, snr: float =
             pond_sim.set_pump(turn_on, reason=f"LoRa CMD from 0x{sender_id:02X}", notify_tank_first_hand=False)
             pond_sim.tank_accord = True
             pond_sim.accord_retry_count = 0
-            # Broadcast confirmation status beacon to Tank Node with turnaround delay
+            # Broadcast confirmation status beacon to Tank Node after fast 180ms turnaround
             def _delayed_cmd_ack():
-                rf = fleet_db.get_target_rf(NODE_TANK)
-                time.sleep(0.8 if rf.get("sf", 9) >= 12 else 0.4)
+                time.sleep(0.18)
                 pond_sim.send_status_beacon(target_id=NODE_TANK, reason="Ack Tank Refill CMD")
             threading.Thread(target=_delayed_cmd_ack, daemon=True).start()
     else:
@@ -1169,7 +1273,7 @@ def parse_rxpk_json(text):
             stat_str = {1: "CRC_OK", -1: "CRC_BAD", 0: "NO_CRC"}.get(stat, str(stat))
 
             # Parse Spreading Factor and Bandwidth dynamically from datr string (e.g. 'SF11BW125')
-            sf = 9
+            sf = 11
             bw_khz = 125
             if datr and datr.startswith("SF"):
                 try:
@@ -1188,7 +1292,8 @@ def parse_rxpk_json(text):
                     payload_disp = f"⚠️ [CRC ERROR ({stat_str})] {payload_disp_HEX}"
                 else:
                     device_decode = decode_device_payload(payload_bytes, rssi=rssi_s, snr=lsnr,
-                                                          sf=sf, bw_khz=bw_khz, freq_hz=freq_hz, stat_str=stat_str)
+                                                          sf=sf, bw_khz=bw_khz, freq_hz=freq_hz,
+                                                          codr=codr or "4/5", stat_str=stat_str)
                     try:
                         payload_disp = f'"{payload_bytes.decode("utf-8")}"'
                     except Exception:
@@ -1297,7 +1402,9 @@ class StationWebHandler(BaseHTTPRequestHandler):
                         "title": "🚨 TANK EMPTY AUTO-LOCKOUT",
                         "msg": "Tank level is 0/3 (Empty) in AUTO mode. Outflow relays interlocked to prevent dry run."
                     })
-                if tank.get("last_seen", 0) > 0 and (time.time() - tank["last_seen"]) > 60:
+                pumps_active = any(tm.get(p, False) for p in ("p1", "p2", "p3", "pond_demand"))
+                watchdog_limit_s = 180 if (tm.get("burst_mode", False) or pumps_active) else 1900
+                if tank.get("last_seen", 0) > 0 and (time.time() - tank["last_seen"]) > watchdog_limit_s:
                     alarms.append({
                         "id": "lora_watchdog",
                         "level": "WARNING",
@@ -1463,16 +1570,18 @@ def simulation_ticker():
             now = time.time()
             pond_sim.step()
 
-            # Gateway -> Tank Watchdog Keepalive (Every 30s to prevent Tank ERR_GATEWAY_TIMEOUT)
-            # Adapts automatically to Tank Node's detected Spreading Factor & Bandwidth
-            if gateway_ip and (now - last_gw_keepalive >= 30.0):
+            # Gateway -> Tank Watchdog Keepalive (Every 45s if no downlink was sent in the last 30s)
+            # Adapts automatically to Tank Node's detected Spreading Factor, Bandwidth, CR & LDRO
+            if gateway_ip and (now - last_gw_keepalive >= 45.0) and (now - pond_sim.last_tx_time >= 30.0):
                 last_gw_keepalive = now
                 rf = fleet_db.get_target_rf(NODE_TANK)
-                target_sf = rf.get("sf", 9)
+                target_sf = rf.get("sf", 11)
                 target_bw = rf.get("bw_khz", 125)
                 target_freq = rf.get("freq_hz", 868_100_000)
+                target_cr = rf.get("cr", "4/5")
+                target_ldro = rf.get("ldro", 1)
                 gw_pkt = bytearray([0x6B, 0x5A, NODE_TANK, NODE_GATEWAY, MSG_STATUS, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0])
-                tx_json = build_custom(bytes(gw_pkt), freq=target_freq, power=14, sf=target_sf, bw=target_bw, cr="4/5", invert=True)
+                tx_json = build_custom(bytes(gw_pkt), freq=target_freq, power=22, sf=target_sf, bw=target_bw, cr=target_cr, ldro=target_ldro, invert=True)
                 send(tx_json)
                 fleet_db.trigger_correlation(NODE_GATEWAY, NODE_TANK, "GATEWAY_KEEPALIVE")
 
@@ -1690,15 +1799,21 @@ def handle(line: str):
                     if new_sf < 6 or new_sf > 12:
                         safe_print("  [!] Spreading factor must be between 6 and 12.")
                         return
+                    node_registry.touch(nid, sf=new_sf)
                     fleet_db.touch_device(nid, sf=new_sf)
+                    if nid == NODE_TANK:
+                        node_registry.touch(NODE_POND, sf=new_sf)
+                        fleet_db.touch_device(NODE_POND, sf=new_sf)
                     safe_print(f"  🎯 [SF OVERRIDE] Target node 0x{nid:02X} downlink SF set to SF{new_sf}!")
                 rf = fleet_db.get_target_rf(nid)
-                safe_print(f"  📡 Node 0x{nid:02X} Target RF: SF{rf['sf']} BW{rf['bw_khz']} kHz Freq {rf['freq_hz']/1e6:.3f} MHz LDRO={'ACTIVE' if rf['ldro'] else 'OFF'}")
+                toa_ms = int(calc_lora_toa_s(17, rf['sf'], rf['bw_khz'], rf['cr'], rf['ldro']) * 1000)
+                guard_s = get_turnaround_guard_s(nid, 17)
+                safe_print(f"  📡 Node 0x{nid:02X} Target RF: SF{rf['sf']} BW{rf['bw_khz']} kHz CR{rf['cr']} Freq {rf['freq_hz']/1e6:.3f} MHz LDRO={'ACTIVE' if rf['ldro'] else 'OFF'} | ToA: {toa_ms}ms (Guard: {guard_s}s)")
                 return
             except Exception as e:
                 safe_print(f"  [!] Invalid /sf syntax: {e}")
                 return
-        safe_print("  Usage: /sf <node_id> [sf_value (7-12)]")
+        safe_print("  Usage: /sf <node_id> [sf_value (6-12)]")
         return
 
     # ── /nodes Command ────────────────────────────────────────────────────────
@@ -1860,6 +1975,9 @@ def handle(line: str):
         p2 = "ON" if m.get("p2") else "OFF"
         p3 = "ON" if m.get("p3") else "OFF"
         pond_demand = "DEMAND ACTIVE" if m.get("pond_demand") else "IDLE"
+        telem_rate = "ACTIVE BURST" if m.get("burst_mode") else "SILENT IDLE"
+        ldro_stat = "ACTIVE (ON)" if m.get("ldro_active") else "OFF"
+        rf_info = fleet_db.get_target_rf(NODE_TANK)
         temp = m.get("temp_c", 0.0)
         hum = m.get("humidity", 0)
         
@@ -1873,7 +1991,8 @@ def handle(line: str):
 
         safe_print(f"  ┌─ Tank Node (0x02) Telemetry (seen {ago}s ago) ─────────")
         safe_print(f"  │ Water Level : {gauge}")
-        safe_print(f"  │ System Mode : {mode}")
+        safe_print(f"  │ System Mode : {mode} | Telem Rate: {telem_rate}")
+        safe_print(f"  │ RF Link     : SF{rf_info['sf']} BW{rf_info['bw_khz']}kHz CR{rf_info['cr']} | LDRO: {ldro_stat}")
         safe_print(f"  │ Outflow P1  : {p1}")
         safe_print(f"  │ Outflow P2  : {p2}")
         safe_print(f"  │ Outflow P3  : {p3}")
