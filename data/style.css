@@ -857,6 +857,12 @@ body {
   box-shadow: 0 0 8px var(--green-glow);
 }
 
+.pump-indicator.pond-ind.active {
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green-glow);
+  animation: pulseBeacon 1.2s infinite ease-in-out;
+}
+
 /* 3-Position Override Segmented Switch */
 .override-panel {
   background: #090d16;
@@ -1703,6 +1709,12 @@ body {
   border-color: rgba(239, 68, 68, 0.4);
 }
 
+.badge-tag.warn {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--amber);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
 .badge-tag.idle {
   background: #090d16;
   color: var(--text-dim);
@@ -1837,6 +1849,30 @@ body {
   letter-spacing: 0.05em;
   font-family: var(--font-mono);
   color: var(--text-main);
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.badge-icon {
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.subcard-icon {
+  font-size: 1.1rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.highlight {
+  color: var(--cyan);
+  font-weight: 700;
 }
 
 /* Settings Tabs */
@@ -2049,3 +2085,188 @@ body {
   background: var(--cyan);
   transition: width 0.2s;
 }
+
+/* ─── QUICK NAVIGATION & OPERATOR ACTION BAR ─────────────────────── */
+.quick-nav-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: linear-gradient(90deg, rgba(17, 24, 39, 0.95), rgba(15, 23, 42, 0.95));
+  border: 1px solid rgba(14, 165, 233, 0.18);
+}
+
+.view-tab-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.view-tab-btn {
+  background: #0b0f19;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.view-tab-btn:hover {
+  color: var(--text-main);
+  border-color: rgba(255, 255, 255, 0.2);
+  background: #162032;
+}
+
+.view-tab-btn.active {
+  background: rgba(14, 165, 233, 0.16);
+  border-color: var(--cyan);
+  color: #38bdf8;
+  box-shadow: 0 0 12px rgba(14, 165, 233, 0.18);
+}
+
+.quick-action-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quick-rf-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: #090d16;
+  border: 1px solid rgba(14, 165, 233, 0.22);
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.69rem;
+  color: #cbd5e1;
+}
+
+.qrf-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green-glow);
+}
+
+.qrf-dot.burst {
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan-glow);
+  animation: pulseBeacon 0.9s infinite alternate;
+}
+
+.quick-sf-select {
+  background: #090d16;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #e2e8f0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.71rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.quick-sf-select:focus {
+  border-color: var(--cyan);
+  outline: none;
+}
+
+.q-act-btn {
+  padding: 6px 11px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.70rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.q-act-btn:active {
+  transform: scale(0.96);
+}
+
+.q-act-cyan {
+  background: rgba(14, 165, 233, 0.14);
+  border-color: rgba(14, 165, 233, 0.4);
+  color: #38bdf8;
+}
+.q-act-cyan:hover {
+  background: rgba(14, 165, 233, 0.26);
+  color: #fff;
+}
+
+.q-act-green {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+.q-act-green:hover {
+  background: rgba(16, 185, 129, 0.26);
+  color: #fff;
+}
+
+.q-act-red {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #f87171;
+}
+.q-act-red:hover {
+  background: rgba(239, 68, 68, 0.3);
+  color: #fff;
+}
+
+/* ─── POND DUAL-STATE ACCORD BADGES ──────────────────────────────── */
+.pond-badges-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-end;
+}
+
+.pond-accord-badge {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+}
+
+.pond-accord-badge.synced-on {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+
+.pond-accord-badge.syncing {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+  animation: pulseBeacon 0.9s infinite alternate;
+}
+
+.pond-toggle-btn.active-demand {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fca5a5;
+}
+.pond-toggle-btn.active-demand:hover {
+  background: rgba(239, 68, 68, 0.32);
+  color: #fff;
+}
+

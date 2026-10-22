@@ -151,16 +151,23 @@ function renderTelemetry(t) {
     if (alarmBeacon) alarmBeacon.className = "alarm-beacon critical";
     if (alarmTitle) alarmTitle.innerText = "RADIO FAULT • SX1262 LoRa SPI LINK LOST";
     if (alarmDesc) alarmDesc.innerText = "LoRa transceiver not responding to SPI transactions. Remote telemetry unreachable.";
+  } else if (t.err === 3) {
+    if (alarmContainer) alarmContainer.className = "alarm-banner-container warning glass-card";
+    if (alarmBeacon) alarmBeacon.className = "alarm-beacon warning";
+    if (alarmTitle) alarmTitle.innerText = "NETWORK WARNING • LORA GATEWAY TIMEOUT";
+    if (alarmDesc) alarmDesc.innerText = "No downlink heartbeat received from LoRa Gateway Coordinator (>15 min silent).";
   } else if (t.wl === 0) {
     if (alarmContainer) alarmContainer.className = "alarm-banner-container critical glass-card";
     if (alarmBeacon) alarmBeacon.className = "alarm-beacon critical";
     if (alarmTitle) alarmTitle.innerText = "CRITICAL TRIP • LEVEL 0 DRY-RUN PROTECTION ACTIVE";
     if (alarmDesc) alarmDesc.innerText = "Reservoir is empty (<1,000L). All outflow pumps locked out to protect against cavitation. Pond refill prioritized.";
   } else {
+    const staggerSec = ((t.cfg_stagger !== undefined ? t.cfg_stagger : 3000) / 1000).toFixed(1);
+    const runSec = Math.round((t.cfg_runtime || 20000) / 1000);
     if (alarmContainer) alarmContainer.className = "alarm-banner-container glass-card";
     if (alarmBeacon) alarmBeacon.className = "alarm-beacon normal";
     if (alarmTitle) alarmTitle.innerText = "NORMAL OPERATION • ALL INTERLOCKS NOMINAL";
-    if (alarmDesc) alarmDesc.innerText = "Water level within operating limits. Anti-inrush start stagger (3s) and anti-chatter locks active.";
+    if (alarmDesc) alarmDesc.innerText = `Water level within operating limits. Anti-inrush start stagger (${staggerSec}s) and anti-chatter (${runSec}s) locks active.`;
   }
 
   // Active Rule determination (firmware streams t.active_rule: 1..4)
@@ -197,29 +204,76 @@ function renderTelemetry(t) {
 
   const bLatch = document.getElementById("bannerLatch");
   if (bLatch) {
-    bLatch.innerText = t.demand ? "CHARGING LATCH ACTIVE" : "IDLE";
-    bLatch.style.color = t.demand ? "var(--green)" : "var(--muted)";
+    if (t.demand && t.pond) {
+      bLatch.innerText = "PUMPING (0x03 ACK)";
+      bLatch.style.color = "var(--green)";
+    } else if (t.demand) {
+      bLatch.innerText = "DEMAND ON (SYNCING)";
+      bLatch.style.color = "var(--amber)";
+    } else {
+      bLatch.innerText = "IDLE";
+      bLatch.style.color = "var(--muted)";
+    }
   }
 
-  // Active Demodulator LDRO status badge in modal
+  const bRadioMode = document.getElementById("bannerRadioMode");
+  if (bRadioMode) {
+    const burst = Boolean(t.burst_mode);
+    bRadioMode.innerText = burst ? "EVENT BURST" : "SILENT IDLE";
+    bRadioMode.style.color = burst ? "var(--cyan)" : "var(--green)";
+  }
+
+  // Quick RF Bar & Quick SF Selector
+  const qRfTxt = document.getElementById("quickRfText");
+  const qRfDot = document.getElementById("qrfDot");
+  const qSfSel = document.getElementById("quickSfSelect");
+  if (qRfTxt && t.lora_sf !== undefined) {
+    const bwKhz = (t.lora_bw > 1000) ? Math.round(t.lora_bw / 1000) : (t.lora_bw || 125);
+    const pwr = (t.lora_power !== undefined) ? t.lora_power : (t.lora_pwr !== undefined ? t.lora_pwr : 22);
+    const ldroTag = t.ldro_active ? "LDRO" : `4/${t.lora_cr || 5}`;
+    qRfTxt.innerText = `SF${t.lora_sf} • ${bwKhz}k • +${pwr}dBm • ${ldroTag} • ToA:${t.toa_ms || '--'}ms`;
+  }
+  if (qRfDot) {
+    qRfDot.classList.toggle("burst", Boolean(t.burst_mode));
+  }
+  if (qSfSel && t.lora_sf !== undefined && document.activeElement !== qSfSel) {
+    qSfSel.value = String(t.lora_sf);
+  }
+
+  // Header TX / RX Counter Badge
+  const bPkt = document.getElementById("badgePktCnt");
+  if (bPkt && t.tx_cnt !== undefined) {
+    bPkt.innerText = `TX: ${t.tx_cnt} | RX: ${t.rx_cnt || 0}`;
+  }
+
+  // Active Demodulator LDRO, ToA, and CAD status badges in modal
   const ldroBadge = document.getElementById("ldroLiveBadge");
   if (ldroBadge && t.ldro_active !== undefined) {
     if (t.ldro_active) {
       ldroBadge.className = "badge-tag running";
-      ldroBadge.innerText = t.lora_ldro === 1 ? "FORCE ON (ACTIVE)" : `AUTO (ACTIVE ON SF${t.lora_sf || 11})`;
+      ldroBadge.innerText = t.lora_ldro === 1 ? "LDRO: FORCE ON" : `LDRO: AUTO ON (SF${t.lora_sf || 11})`;
     } else {
       ldroBadge.className = "badge-tag idle";
-      ldroBadge.innerText = t.lora_ldro === 2 ? "FORCE OFF" : "INACTIVE";
+      ldroBadge.innerText = t.lora_ldro === 2 ? "LDRO: FORCE OFF" : `LDRO: OFF (SF${t.lora_sf || 9})`;
     }
   }
+  const toaBadge = document.getElementById("toaLiveBadge");
+  if (toaBadge && t.toa_ms !== undefined) {
+    toaBadge.innerText = `ToA: ${t.toa_ms} ms • Tsym: ${(t.sym_ms || 0).toFixed(2)} ms`;
+  }
+  const cadSum = document.getElementById("cadLiveSummary");
+  if (cadSum) {
+    cadSum.innerText = `🛡️ LBT 4-Symbol Hardware CAD (SX126X_CAD_ON_4_SYMB) Active • Guard: ${t.guard_ms || 400} ms • Deferrals: ${t.cad_busy_cnt || 0}`;
+  }
 
-  // 1. Water Level Height & Text
+  // 1. Dynamic Reservoir Capacity & Water Level Height/Text
+  const capLiters = t.tank_capacity || 10000;
   const heights = [0, 33, 66, 100];
   const labels = [
-    "WL: 0 (EMPTY 0% <1,000L)",
-    "WL: 1 (LOW 33% ~3,300L)",
-    "WL: 2 (MID 66% ~6,600L)",
-    "WL: 3 (FULL 100% ~10,000L)"
+    `WL: 0 (EMPTY 0% <${Math.round(capLiters * 0.1).toLocaleString()}L)`,
+    `WL: 1 (LOW 33% ~${Math.round(capLiters * 0.33).toLocaleString()}L)`,
+    `WL: 2 (MID 66% ~${Math.round(capLiters * 0.66).toLocaleString()}L)`,
+    `WL: 3 (FULL 100% ~${capLiters.toLocaleString()}L)`
   ];
   const wl = Math.min(Math.max(t.wl, 0), 3);
 
@@ -227,6 +281,11 @@ function renderTelemetry(t) {
   if (liquidBody) liquidBody.style.height = `${heights[wl]}%`;
   const lvlText = document.getElementById("tankLevelText");
   if (lvlText) lvlText.innerText = labels[wl];
+
+  const pondDesc = document.getElementById("pondDesc");
+  if (pondDesc && t.refill_trigger !== undefined && t.refill_cutoff !== undefined) {
+    pondDesc.innerText = `Refills reservoir via telemetry demand packet. Auto trigger at ≤ L${t.refill_trigger}, cutoff at ≥ L${t.refill_cutoff}.`;
+  }
 
   // 2. Float Sensor Buoys (L1, L2, L3)
   const b1 = document.getElementById("beadL1");
@@ -253,6 +312,10 @@ function renderTelemetry(t) {
       alertBar.classList.add("alert");
       healthText.innerText = "HARDWARE FAULT: PCF8574 I²C Bus Disconnected!";
       if (lastErrorCode !== 2) playAlert();
+    } else if (t.err === 3) { // ERR_GATEWAY_TIMEOUT
+      alertBar.classList.add("alert");
+      healthText.innerText = "NETWORK WARNING: LoRa Gateway Coordinator Silent (>15 min)!";
+      if (lastErrorCode !== 3) playAlert();
     } else {
       if (b1) b1.classList.remove("fault");
       if (b2) b2.classList.remove("fault");
@@ -266,21 +329,42 @@ function renderTelemetry(t) {
   // 3. Inflow Pipe (From Remote Pond)
   const inflowWater = document.getElementById("inflowPipeWater");
   const waterJet = document.getElementById("waterJet");
-  const pondActive = Boolean(t.pond);
+  const pondDemand = Boolean(t.demand);
+  const pondRemoteAck = Boolean(t.pond);
+  const pondFlowVisual = pondDemand || pondRemoteAck;
 
-  if (inflowWater) inflowWater.classList.toggle("active", pondActive);
-  if (waterJet) waterJet.classList.toggle("active", pondActive);
+  if (inflowWater) inflowWater.classList.toggle("active", pondFlowVisual);
+  if (waterJet) waterJet.classList.toggle("active", pondFlowVisual);
 
-  // Pond Controller Card
+  // Pond Controller Card (Dual-State: Local Demand vs Remote 0x03 Accord)
   const indPond = document.getElementById("indPond");
   const btnPond = document.getElementById("btnPond");
   const latchBadge = document.getElementById("latchBadge");
+  const accordBadge = document.getElementById("pondAccordBadge");
 
-  if (indPond) indPond.classList.toggle("active", pondActive);
-  if (btnPond) btnPond.innerText = pondActive ? "STOP POND" : "REQUEST REFILL";
+  if (indPond) indPond.classList.toggle("active", pondFlowVisual);
+  if (btnPond) {
+    btnPond.innerText = pondDemand ? "STOP POND REFILL" : "REQUEST REFILL";
+    btnPond.classList.toggle("active-demand", pondDemand);
+  }
   if (latchBadge) {
-    latchBadge.innerText = t.demand ? "CHARGING LATCH: ON" : "LATCH: IDLE";
-    latchBadge.classList.toggle("active", Boolean(t.demand));
+    latchBadge.innerText = pondDemand ? "DEMAND LATCH: ON" : "DEMAND: IDLE";
+    latchBadge.classList.toggle("active", pondDemand);
+  }
+  if (accordBadge) {
+    if (pondDemand && pondRemoteAck) {
+      accordBadge.innerText = "0x03 ACK: PUMPING";
+      accordBadge.className = "pond-accord-badge synced-on";
+    } else if (pondDemand && !pondRemoteAck) {
+      accordBadge.innerText = "0x03 ACK: SYNCING...";
+      accordBadge.className = "pond-accord-badge syncing";
+    } else if (!pondDemand && pondRemoteAck) {
+      accordBadge.innerText = "0x03 ACK: STOPPING...";
+      accordBadge.className = "pond-accord-badge syncing";
+    } else {
+      accordBadge.innerText = "0x03 ACK: STANDBY";
+      accordBadge.className = "pond-accord-badge";
+    }
   }
 
   // 4. Outflow Pipes & Pump Faceplates (P1, P2, P3)
@@ -474,14 +558,20 @@ function renderTelemetry(t) {
 function renderConfig(c) {
   const rInput = document.getElementById("cfgRuntime");
   const cInput = document.getElementById("cfgCooldown");
-  const tInput = document.getElementById("cfgTelem");
+  const stgInput = document.getElementById("cfgStagger");
+  const tiInput = document.getElementById("cfgTelemIdle");
+  const tbInput = document.getElementById("cfgTelemBurst");
   const bSelect = document.getElementById("cfgBootAuto");
   const aCheck = document.getElementById("cfgAlwaysOn");
   const sInput = document.getElementById("cfgStaSsid");
 
   if (rInput && c.runtime !== undefined) rInput.value = c.runtime;
   if (cInput && c.cooldown !== undefined) cInput.value = c.cooldown;
-  if (tInput && c.telem !== undefined) tInput.value = c.telem;
+  if (stgInput && c.stagger !== undefined) stgInput.value = c.stagger;
+  if (tiInput && (c.telem_idle !== undefined || c.telem !== undefined)) {
+    tiInput.value = (c.telem_idle !== undefined) ? c.telem_idle : c.telem;
+  }
+  if (tbInput && c.telem_burst !== undefined) tbInput.value = c.telem_burst;
   if (bSelect && c.boot_auto !== undefined) bSelect.value = c.boot_auto;
   if (aCheck && c.always_on !== undefined) aCheck.checked = Boolean(c.always_on);
   if (sInput && c.sta_ssid) sInput.value = c.sta_ssid;
@@ -490,11 +580,21 @@ function renderConfig(c) {
   const capInput = document.getElementById("cfgCapacity");
   const trigSelect = document.getElementById("cfgTrigger");
   const cutSelect = document.getElementById("cfgCutoff");
-  if (capInput && c.tank_capacity) capInput.value = c.tank_capacity;
+  if (capInput && c.tank_capacity) {
+    capInput.value = c.tank_capacity;
+    tankCapacityLiters = c.tank_capacity;
+  }
   if (trigSelect && c.refill_trigger !== undefined) trigSelect.value = c.refill_trigger;
   if (cutSelect && c.refill_cutoff !== undefined) cutSelect.value = c.refill_cutoff;
 
-  // LoRa RF
+  if (c.auto_mask && Array.isArray(c.auto_mask)) {
+    for (let i = 0; i < 3; i++) {
+      const mChk = document.getElementById(`cfgMaskP${i + 1}`);
+      if (mChk) mChk.checked = Boolean(c.auto_mask[i]);
+    }
+  }
+
+  // LoRa RF & LBT
   const freqInput = document.getElementById("cfgLoraFreq");
   const pwrInput = document.getElementById("cfgLoraPwr");
   const sfSelect = document.getElementById("cfgLoraSf");
@@ -502,6 +602,9 @@ function renderConfig(c) {
   const crSelect = document.getElementById("cfgLoraCr");
   const ldroSelect = document.getElementById("cfgLoraLdro");
   const syncInput = document.getElementById("cfgLoraSync");
+  const lbtRetInput = document.getElementById("cfgLbtRetries");
+  const lbtBackInput = document.getElementById("cfgLbtBackoff");
+
   if (freqInput && c.lora_freq) freqInput.value = c.lora_freq;
   if (pwrInput && c.lora_power !== undefined) pwrInput.value = c.lora_power;
   if (sfSelect && c.lora_sf) sfSelect.value = c.lora_sf;
@@ -509,6 +612,51 @@ function renderConfig(c) {
   if (crSelect && c.lora_cr) crSelect.value = c.lora_cr;
   if (ldroSelect && c.lora_ldro !== undefined) ldroSelect.value = c.lora_ldro;
   if (syncInput && c.lora_sync) syncInput.value = c.lora_sync;
+  if (lbtRetInput && c.lbt_retries !== undefined) lbtRetInput.value = c.lbt_retries;
+  if (lbtBackInput && c.lbt_backoff !== undefined) lbtBackInput.value = c.lbt_backoff;
+
+  previewLoraAirtime();
+}
+
+function previewLoraAirtime() {
+  const sfEl = document.getElementById("cfgLoraSf");
+  const bwEl = document.getElementById("cfgLoraBw");
+  const crEl = document.getElementById("cfgLoraCr");
+  const ldroEl = document.getElementById("cfgLoraLdro");
+  if (!sfEl || !bwEl || !crEl || !ldroEl) return;
+
+  const sf = parseInt(sfEl.value, 10) || 9;
+  const rawBw = parseInt(bwEl.value, 10) || 125;
+  const bwKhz = rawBw > 1000 ? (rawBw / 1000.0) : rawBw;
+  const cr = parseInt(crEl.value, 10) || 5;
+  const ldroMode = parseInt(ldroEl.value, 10) || 0;
+
+  const tSymMs = Math.pow(2, sf) / bwKhz;
+  const ldroOn = (ldroMode === 1) ? true : (ldroMode === 2 ? false : (tSymMs >= 16.0));
+  const de = ldroOn ? 1 : 0;
+  const tPreamble = (8.0 + 4.25) * tSymMs;
+  const num = 8.0 * 17.0 - 4.0 * sf + 28.0 + 16.0;
+  const den = 4.0 * (sf - 2.0 * de);
+  let payloadSymbNb = 8.0;
+  if (den > 0) {
+    const c = Math.ceil(num / den);
+    if (c > 0) payloadSymbNb += c * cr;
+  }
+  const toaMs = Math.round(tPreamble + payloadSymbNb * tSymMs);
+  const sfFloor = (sf >= 12) ? 1800 : (sf === 11 ? 1200 : (sf === 10 ? 800 : 400));
+  const guardMs = Math.max(sfFloor, Math.floor((toaMs * 3) / 2));
+
+  const ldroBadge = document.getElementById("ldroLiveBadge");
+  if (ldroBadge) {
+    const modeStr = ldroMode === 0 ? "AUTO" : (ldroMode === 1 ? "FORCE ON" : "FORCE OFF");
+    ldroBadge.innerText = `LDRO: ${ldroOn ? "ON" : "OFF"} (${modeStr} | Tsym=${tSymMs.toFixed(2)}ms)`;
+    ldroBadge.className = ldroOn ? "badge-tag ok" : "badge-tag idle";
+  }
+
+  const toaBadge = document.getElementById("toaLiveBadge");
+  if (toaBadge) {
+    toaBadge.innerText = `ToA: ${toaMs} ms | Guard: ${guardMs} ms`;
+  }
 }
 
 // ─── REAL-TIME SPARKLINE CANVAS GRAPH ──────────────────────────────
@@ -577,9 +725,73 @@ function updateSparkline(level, rssi) {
 }
 
 // ─── USER ACTIONS & COMMANDS ───────────────────────────────────────
+function switchDashboardView(view) {
+  playClick();
+  const mainGrid = document.querySelector(".main-grid");
+  const autoSec = document.getElementById("automationMatrixSection");
+  const liveSec = document.getElementById("ioMatrixSection");
+  const matrixContent = document.getElementById("matrixContent");
+
+  document.querySelectorAll(".view-tab-btn").forEach(b => b.classList.remove("active"));
+  if (view === "all") {
+    document.getElementById("vTabAll")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "";
+    if (autoSec) autoSec.style.display = "";
+    if (liveSec) liveSec.style.display = "";
+  } else if (view === "ops") {
+    document.getElementById("vTabOps")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "";
+    if (autoSec) autoSec.style.display = "none";
+    if (liveSec) liveSec.style.display = "none";
+  } else if (view === "matrix") {
+    document.getElementById("vTabMatrix")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "none";
+    if (autoSec) autoSec.style.display = "none";
+    if (liveSec) liveSec.style.display = "";
+    if (matrixContent) matrixContent.classList.remove("collapsed");
+  } else if (view === "rules") {
+    document.getElementById("vTabRules")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "none";
+    if (autoSec) autoSec.style.display = "";
+    if (liveSec) liveSec.style.display = "none";
+  }
+}
+
+function triggerManualBeacon() {
+  playClick();
+  sendJson({ cmd: "tx_now" });
+}
+
+function resetAllOverrides() {
+  playClick();
+  sendJson({ cmd: "reset_overrides" });
+}
+
+function emergencyStopPumps() {
+  playAlert();
+  for (let id = 1; id <= 3; id++) {
+    sendJson({ cmd: "set_pump_override", id: id, mode: "FORCE_OFF", duration: 0 });
+  }
+  showToast("E-STOP: All 3 Outflow Pumps Locked OFF!", true);
+}
+
+function quickChangeSf(sfVal) {
+  playChime();
+  const sf = parseInt(sfVal, 10);
+  if (isNaN(sf) || sf < 6 || sf > 12) return;
+  const sfSelect = document.getElementById("cfgLoraSf");
+  if (sfSelect) sfSelect.value = sf;
+  // Only send the SF field; firmware keeps all other RF parameters untouched
+  sendJson({ cmd: "set_lora_config", sf: sf });
+}
+
 function setMode(isAuto) {
   playClick();
-  sendJson({ cmd: "mode" });
+  const btnAuto = document.getElementById("btnModeAuto");
+  const btnMan = document.getElementById("btnModeMan");
+  if (btnAuto) btnAuto.classList.toggle("active", Boolean(isAuto));
+  if (btnMan) btnMan.classList.toggle("active", !isAuto);
+  sendJson({ cmd: "mode", val: isAuto ? 1 : 0 });
 }
 
 function setPumpOverride(id, mode, durationMin = null) {
@@ -606,11 +818,27 @@ function onDurationChange(id) {
 
 function togglePump(id) {
   playClick();
-  sendJson({ cmd: "pump", id: id });
+  const t = lastTelemetryObj;
+  if (t && t.mode === "AUTO") {
+    const isCurrentlyRunning = Boolean(t.pumps?.[id - 1]);
+    const durSelect = document.getElementById(`durP${id}`);
+    const dur = durSelect ? parseInt(durSelect.value, 10) : 0;
+    // In AUTO mode, START/STOP P# directly sets FORCE ON (1) or LOCK OFF (2)
+    sendJson({
+      cmd: "set_pump_override",
+      id: id,
+      mode: isCurrentlyRunning ? "FORCE_OFF" : "FORCE_ON",
+      duration: isCurrentlyRunning ? 0 : dur
+    });
+  } else {
+    sendJson({ cmd: "pump", id: id });
+  }
 }
 
 function togglePond() {
   playClick();
+  const btnPond = document.getElementById("btnPond");
+  if (btnPond) btnPond.innerText = "SYNCING...";
   sendJson({ cmd: "pond" });
 }
 
@@ -663,25 +891,29 @@ function saveHydraulicsConfig() {
   const cap = parseInt(document.getElementById("cfgCapacity").value, 10);
   const trig = parseInt(document.getElementById("cfgTrigger").value, 10);
   const cut = parseInt(document.getElementById("cfgCutoff").value, 10);
+  const m1 = document.getElementById("cfgMaskP1")?.checked ? 1 : 0;
+  const m2 = document.getElementById("cfgMaskP2")?.checked ? 1 : 0;
+  const m3 = document.getElementById("cfgMaskP3")?.checked ? 1 : 0;
+  const r = parseInt(document.getElementById("cfgRuntime").value, 10);
+  const c = parseInt(document.getElementById("cfgCooldown").value, 10);
+  const stg = parseInt(document.getElementById("cfgStagger").value, 10);
+  const ti = parseInt(document.getElementById("cfgTelemIdle").value, 10);
+  const tb = parseInt(document.getElementById("cfgTelemBurst").value, 10);
+  const b = parseInt(document.getElementById("cfgBootAuto").value, 10);
+
   sendJson({
     cmd: "set_hydraulic_config",
     capacity: cap,
     trigger: trig,
-    cutoff: cut
-  });
-
-  const r = parseInt(document.getElementById("cfgRuntime").value, 10);
-  const c = parseInt(document.getElementById("cfgCooldown").value, 10);
-  const t = parseInt(document.getElementById("cfgTelem").value, 10);
-  const b = parseInt(document.getElementById("cfgBootAuto").value, 10);
-  sendJson({
-    cmd: "set_config",
+    cutoff: cut,
+    auto_mask: [m1, m2, m3],
     runtime: r,
     cooldown: c,
-    telem: t,
+    stagger: stg,
+    telem_idle: ti,
+    telem_burst: tb,
     boot_auto: b
   });
-  showToast("Hydraulics & Timings Saved!", false);
 }
 
 function saveLoraConfig() {
@@ -693,6 +925,8 @@ function saveLoraConfig() {
   const cr = parseInt(document.getElementById("cfgLoraCr").value, 10);
   const ldro = parseInt(document.getElementById("cfgLoraLdro").value, 10);
   const sync = document.getElementById("cfgLoraSync").value.trim();
+  const lbtRetries = parseInt(document.getElementById("cfgLbtRetries").value, 10);
+  const lbtBackoff = parseInt(document.getElementById("cfgLbtBackoff").value, 10);
   sendJson({
     cmd: "set_lora_config",
     freq: freq,
@@ -701,9 +935,10 @@ function saveLoraConfig() {
     bw: bw,
     cr: cr,
     ldro: isNaN(ldro) ? 0 : ldro,
-    sync: sync
+    sync: sync,
+    lbt_retries: isNaN(lbtRetries) ? 4 : lbtRetries,
+    lbt_backoff: isNaN(lbtBackoff) ? 60 : lbtBackoff
   });
-  showToast("LoRa RF Tuning Applied!", false);
 }
 
 function saveWifiConfig() {
@@ -979,6 +1214,8 @@ function renderMatrix(t) {
       plausEl.innerHTML = `<span class="badge-tag fault">PLAUSIBILITY FAULT</span>`;
     } else if (t.err === 2) {
       plausEl.innerHTML = `<span class="badge-tag fault">I²C DISCONNECTED</span>`;
+    } else if (t.err === 3) {
+      plausEl.innerHTML = `<span class="badge-tag warn">GATEWAY TIMEOUT</span>`;
     } else {
       plausEl.innerHTML = `<span class="badge-tag ok">VALID (L:${t.wl})</span>`;
     }
@@ -1097,6 +1334,43 @@ function renderMatrix(t) {
     humEl.innerText = `${t.hum} % RH`;
   }
 
+  // RF Modulation, ToA & LBT CAD Matrix Fields
+  const rfModEl = document.getElementById("mRfModulation");
+  if (rfModEl && t.lora_sf !== undefined) {
+    const bwKhz = (t.lora_bw > 1000) ? Math.round(t.lora_bw / 1000) : (t.lora_bw || 125);
+    const pwr = (t.lora_power !== undefined) ? t.lora_power : (t.lora_pwr !== undefined ? t.lora_pwr : 22);
+    rfModEl.innerText = `SF${t.lora_sf} | ${bwKhz}kHz | 4/${t.lora_cr || 5} | ${pwr >= 0 ? "+" : ""}${pwr}dBm`;
+  }
+
+  const rfToaEl = document.getElementById("mRfToaLdro");
+  if (rfToaEl && t.toa_ms !== undefined) {
+    const ldroTxt = t.ldro_active ? "LDRO:ON" : "LDRO:OFF";
+    rfToaEl.innerHTML = `<span class="badge-tag ${t.ldro_active ? 'ok' : 'idle'}">${ldroTxt}</span> ${t.toa_ms}ms (Guard: ${t.guard_ms}ms)`;
+  }
+
+  const rfCadEl = document.getElementById("mRfCadLbt");
+  if (rfCadEl) {
+    const defers = (t.cad_busy_cnt !== undefined) ? t.cad_busy_cnt : (t.cad_defers || 0);
+    const lastBo = t.last_cad_backoff || 0;
+    rfCadEl.innerText = `4-Symb | Retries: ${t.lbt_retries ?? 4} | Deferrals: ${defers} | Backoff: ${lastBo}ms`;
+  }
+
+  const telemModeEl = document.getElementById("mTelemRateMode");
+  if (telemModeEl) {
+    const burst = Boolean(t.burst_mode);
+    const activeMs = t.cfg_telem || (burst ? t.cfg_telem_burst : t.cfg_telem_idle) || 3000;
+    telemModeEl.innerHTML = burst
+      ? `<span class="badge-tag active">EVENT BURST (${(activeMs / 1000).toFixed(1)}s)</span>`
+      : `<span class="badge-tag ok">SILENT IDLE (${Math.round(activeMs / 1000)}s)</span>`;
+  }
+
+  const pktStatsEl = document.getElementById("mRfPktStats");
+  if (pktStatsEl && t.tx_cnt !== undefined) {
+    const txAgo = (t.last_tx_ago >= 0) ? `${t.last_tx_ago}s ago` : "never";
+    const rxAgo = (t.last_rx_ago >= 0) ? `${t.last_rx_ago}s ago` : "never";
+    pktStatsEl.innerText = `TX: ${t.tx_cnt} (${txAgo}) • RX: ${t.rx_cnt || 0} (${rxAgo})`;
+  }
+
   // 4. MCU & Network
   const freeBytes = t.heap || 0;
   const freeKb = Math.round(freeBytes / 1024);
@@ -1137,7 +1411,10 @@ function renderMatrix(t) {
   // NVS Timers & Auto Masks
   const nvsTimersEl = document.getElementById("mNvsTimers");
   if (nvsTimersEl && t.cfg_runtime) {
-    nvsTimersEl.innerText = `${t.cfg_runtime/1000}s / ${t.cfg_cooldown/1000}s / ${t.cfg_telem/1000}s`;
+    const stgS = (t.cfg_stagger || 3000) / 1000;
+    const idleS = (t.cfg_telem_idle || t.cfg_telem || 600000) / 1000;
+    const burstS = (t.cfg_telem_burst || 3000) / 1000;
+    nvsTimersEl.innerText = `RT:${t.cfg_runtime/1000}s CD:${t.cfg_cooldown/1000}s STG:${stgS}s | Idle:${idleS}s Burst:${burstS}s`;
   }
 
   const masksEl = document.getElementById("mAutoMasks");

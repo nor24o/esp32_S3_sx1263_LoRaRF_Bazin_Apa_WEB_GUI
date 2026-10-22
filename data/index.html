@@ -27,15 +27,47 @@
           <span class="badge-icon">📶</span>
           <span id="badgeRssi">RSSI: -- dBm</span>
         </div>
+        <div class="badge" title="LoRa TX/RX Packet Counter (Event-Driven)">
+          <span class="badge-icon">⚡</span>
+          <span id="badgePktCnt">TX: 0 | RX: 0</span>
+        </div>
         <div class="badge" title="System Uptime">
           <span class="badge-icon">⏱️</span>
           <span id="badgeUptime">Up: 0s</span>
         </div>
+        <button class="icon-btn" id="btnTxNowHeader" onclick="triggerManualBeacon()" title="Transmit Immediate LoRa Status Beacon">📤</button>
         <button class="icon-btn" id="btnMatrixHeader" onclick="toggleMatrix()" title="Toggle Live Parameters & I/O Matrix">📊</button>
         <button class="icon-btn" id="btnAudioToggle" title="Toggle Sound FX">🔊</button>
         <button class="icon-btn" id="btnSettingsOpen" title="Settings & Network">⚙️</button>
       </div>
     </header>
+
+    <!-- Quick Navigation & Operator Action Bar -->
+    <nav class="quick-nav-bar glass-card">
+      <div class="view-tab-group">
+        <button class="view-tab-btn active" id="vTabAll" onclick="switchDashboardView('all')">🎛️ Full SCADA Deck</button>
+        <button class="view-tab-btn" id="vTabOps" onclick="switchDashboardView('ops')">💧 Hydraulic Control</button>
+        <button class="view-tab-btn" id="vTabMatrix" onclick="switchDashboardView('matrix')">⚡ Hardware I/O &amp; RF</button>
+        <button class="view-tab-btn" id="vTabRules" onclick="switchDashboardView('rules')">📋 Automation Rules</button>
+      </div>
+      <div class="quick-action-group">
+        <div class="quick-rf-pill" id="quickRfBar" title="Active LoRa Modulation, LDRO, and Time-on-Air">
+          <span class="qrf-dot" id="qrfDot"></span>
+          <span id="quickRfText">SF9 &bull; BW125 &bull; +22dBm &bull; ToA: --ms</span>
+        </div>
+        <select class="quick-sf-select" id="quickSfSelect" onchange="quickChangeSf(this.value)" title="Instant Spreading Factor Switch">
+          <option value="7">SF7 (Fast)</option>
+          <option value="8">SF8</option>
+          <option value="9" selected>SF9 (Bal)</option>
+          <option value="10">SF10 (700m+)</option>
+          <option value="11">SF11 (LDRO)</option>
+          <option value="12">SF12 (Max)</option>
+        </select>
+        <button class="q-act-btn q-act-cyan" onclick="triggerManualBeacon()" title="Transmit 1 Status Packet Now">📡 Beacon TX</button>
+        <button class="q-act-btn q-act-green" onclick="resetAllOverrides()" title="Return P1, P2, P3 to AUTO Schedule">🔄 All AUTO</button>
+        <button class="q-act-btn q-act-red" onclick="emergencyStopPumps()" title="Lock OFF all 3 Outflow Pumps immediately">🛑 E-Stop P1-P3</button>
+      </div>
+    </nav>
 
     <!-- ISA-18.2 Priority Alarm & Operational Status Banner -->
     <div class="alarm-banner-container glass-card" id="alarmBanner">
@@ -47,9 +79,10 @@
         </div>
       </div>
       <div class="alarm-right-metrics">
-        <div class="banner-pill" title="Current Automation Rule active on ESP32-S3"><span class="bp-label">HYDRAULIC RULE:</span> <span class="bp-val" id="bannerActiveRule">RULE 2 (MID WL)</span></div>
-        <div class="banner-pill" title="Pumps with active manual overrides"><span class="bp-label">ACTIVE OVERRIDES:</span> <span class="bp-val" id="bannerOverrides">NONE (AUTO)</span></div>
+        <div class="banner-pill" title="Current Automation Rule active on ESP32-S3"><span class="bp-label">RULE:</span> <span class="bp-val" id="bannerActiveRule">RULE 2 (MID WL)</span></div>
+        <div class="banner-pill" title="Pumps with active manual overrides"><span class="bp-label">OVERRIDES:</span> <span class="bp-val" id="bannerOverrides">NONE (AUTO)</span></div>
         <div class="banner-pill" title="LoRa remote pond refill latch"><span class="bp-label">POND REFILL:</span> <span class="bp-val" id="bannerLatch">IDLE</span></div>
+        <div class="banner-pill" title="Event-Driven Radio Telemetry State"><span class="bp-label">RADIO MODE:</span> <span class="bp-val" id="bannerRadioMode">SILENT IDLE</span></div>
       </div>
     </div>
 
@@ -357,13 +390,16 @@
               <span class="pump-indicator pond-ind" id="indPond"></span>
               <div>
                 <h4>REMOTE POND REFILL PUMP</h4>
-                <span class="pump-sub-tag">SX1262 LoRa Node 0x03 &bull; EU868</span>
+                <span class="pump-sub-tag">SX1262 LoRa Node 0x03 &bull; EU868 Accord</span>
               </div>
             </div>
             <p class="pond-desc" id="pondDesc">Refills reservoir via telemetry demand packet. Auto trigger at &le; L1, cutoff at &ge; L3.</p>
           </div>
           <div class="pond-actions">
-            <div class="charge-latch-badge" id="latchBadge">LATCH: IDLE</div>
+            <div class="pond-badges-stack">
+              <div class="charge-latch-badge" id="latchBadge">DEMAND: IDLE</div>
+              <div class="pond-accord-badge" id="pondAccordBadge">0x03 ACK: STANDBY</div>
+            </div>
             <button class="pond-toggle-btn" id="btnPond" onclick="togglePond()">REQUEST REFILL</button>
           </div>
         </div>
@@ -664,6 +700,31 @@
               <span class="m-col-val" id="mRadioHealth"><span class="badge-tag ok">ONLINE</span></span>
             </div>
             <div class="matrix-row">
+              <span class="m-col-pin">RF MOD</span>
+              <span class="m-col-name">Modulation &amp; TX Power</span>
+              <span class="m-col-val" id="mRfModulation">868.1 MHz &bull; SF9 BW125 (+22 dBm)</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">AIRTIME</span>
+              <span class="m-col-name">LDRO Engine &amp; Packet ToA</span>
+              <span class="m-col-val" id="mRfToaLdro"><span class="badge-tag idle">LDRO: OFF</span> &bull; ToA: -- ms</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">CAD / LBT</span>
+              <span class="m-col-name">4-Symbol Hardware CAD</span>
+              <span class="m-col-val" id="mRfCadLbt"><span class="badge-tag ok">4-SYMB CAD</span> &bull; Deferrals: 0</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">TELEM</span>
+              <span class="m-col-name">Event-Driven Dual-Rate Engine</span>
+              <span class="m-col-val" id="mTelemRateMode"><span class="badge-tag idle">SILENT IDLE (600s)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">PACKETS</span>
+              <span class="m-col-name">LoRa TX / RX Frame Counters</span>
+              <span class="m-col-val" id="mRfPktStats">TX: 0 &bull; RX: 0 (Idle)</span>
+            </div>
+            <div class="matrix-row">
               <span class="m-col-pin">NODES</span>
               <span class="m-col-name">Tank: 0x02 | GW: 0x01 | Pond: 0x03</span>
               <span class="m-col-val"><span class="badge-tag ok">CONFIGURED</span></span>
@@ -792,49 +853,70 @@
           <div class="form-grid-2">
             <div class="form-row">
               <label for="cfgCapacity">Reservoir Capacity (L):</label>
-              <input type="number" id="cfgCapacity" min="100" max="1000000" step="500" value="10000">
+              <input type="number" id="cfgCapacity" min="100" max="1000000" step="100" value="10000">
             </div>
             <div class="form-row">
-              <label for="cfgTrigger">Refill Trigger (Low):</label>
+              <label for="cfgBootAuto">Default Boot Mode:</label>
+              <select id="cfgBootAuto">
+                <option value="0">Manual Mode</option>
+                <option value="1">Automatic Mode</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgTrigger">Refill Trigger (Low L0-L2):</label>
               <select id="cfgTrigger">
                 <option value="0">Level 0 (Empty 0%)</option>
                 <option value="1" selected>Level 1 (Low 33%)</option>
                 <option value="2">Level 2 (Mid 66%)</option>
               </select>
             </div>
-          </div>
-          <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgCutoff">Refill Cutoff (Full):</label>
+              <label for="cfgCutoff">Refill Cutoff (Full L1-L3):</label>
               <select id="cfgCutoff">
+                <option value="1">Level 1 (Low 33%)</option>
                 <option value="2">Level 2 (Mid 66%)</option>
                 <option value="3" selected>Level 3 (Full 100%)</option>
               </select>
             </div>
+          </div>
+          <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgTelem">Telemetry Interval (ms):</label>
-              <input type="number" id="cfgTelem" min="2000" max="300000" step="1000" value="30000">
+              <label for="cfgTelemIdle">Silent Idle Keepalive (ms):</label>
+              <input type="number" id="cfgTelemIdle" min="5000" max="3600000" step="5000" value="600000" title="Default 600,000 ms (10 min). Range: 5s to 60 min">
+            </div>
+            <div class="form-row">
+              <label for="cfgTelemBurst">Active Burst Interval (ms):</label>
+              <input type="number" id="cfgTelemBurst" min="1000" max="60000" step="500" value="3000" title="Default 3,000 ms (3.0s). Range: 1.0s to 60.0s">
             </div>
           </div>
           <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgRuntime">Min Runtime (ms):</label>
+              <label for="cfgRuntime">Pump Min Runtime (ms):</label>
               <input type="number" id="cfgRuntime" min="1000" max="300000" step="1000" value="20000">
             </div>
             <div class="form-row">
-              <label for="cfgCooldown">Min Cooldown (ms):</label>
-              <input type="number" id="cfgCooldown" min="5000" max="600000" step="1000" value="20000">
+              <label for="cfgCooldown">Pump Min Cooldown (ms):</label>
+              <input type="number" id="cfgCooldown" min="1000" max="600000" step="1000" value="20000">
             </div>
           </div>
-          <div class="form-row checkbox-row" style="margin-top:8px;">
-            <label for="cfgBootAuto">Default Boot Mode:</label>
-            <select id="cfgBootAuto">
-              <option value="0">Manual Mode</option>
-              <option value="1">Automatic Mode</option>
-            </select>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgStagger">Motor Anti-Inrush Stagger (ms):</label>
+              <input type="number" id="cfgStagger" min="0" max="60000" step="500" value="3000">
+            </div>
+            <div class="form-row">
+              <label>Auto Pump Masks (P1-P3):</label>
+              <div style="display:flex; gap:12px; align-items:center; margin-top:8px;">
+                <label class="auto-mask-check"><input type="checkbox" id="cfgMaskP1" checked><span>P1</span></label>
+                <label class="auto-mask-check"><input type="checkbox" id="cfgMaskP2" checked><span>P2</span></label>
+                <label class="auto-mask-check"><input type="checkbox" id="cfgMaskP3" checked><span>P3</span></label>
+              </div>
+            </div>
           </div>
           <div class="modal-actions" style="margin-top:14px;">
-            <button class="btn btn-primary" onclick="saveHydraulicsConfig()">SAVE HYDRAULICS</button>
+            <button class="btn btn-primary" onclick="saveHydraulicsConfig()">SAVE HYDRAULICS &amp; TIMINGS</button>
           </div>
         </div>
 
@@ -846,25 +928,26 @@
               <input type="number" id="cfgLoraFreq" min="150000000" max="960000000" step="100000" value="868100000">
             </div>
             <div class="form-row">
-              <label for="cfgLoraPwr">TX Power (dBm, 2..22):</label>
-              <input type="number" id="cfgLoraPwr" min="-9" max="22" step="1" value="14">
+              <label for="cfgLoraPwr">TX Power (dBm, -9..+22):</label>
+              <input type="number" id="cfgLoraPwr" min="-9" max="22" step="1" value="22">
             </div>
           </div>
           <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgLoraSf">Spreading Factor (SF):</label>
-              <select id="cfgLoraSf">
+              <label for="cfgLoraSf">Spreading Factor (SF6-SF12):</label>
+              <select id="cfgLoraSf" onchange="previewLoraAirtime()">
+                <option value="6">SF6 (Ultra-Fast / Short Range)</option>
                 <option value="7">SF7 (Fast / High Data Rate)</option>
                 <option value="8">SF8</option>
                 <option value="9" selected>SF9 (Balanced Default)</option>
-                <option value="10">SF10</option>
-                <option value="11">SF11</option>
-                <option value="12">SF12 (Longest Range / Penetration)</option>
+                <option value="10">SF10 (Long Range 700m+)</option>
+                <option value="11">SF11 (High Penetration + Auto LDRO)</option>
+                <option value="12">SF12 (Maximum Penetration + Auto LDRO)</option>
               </select>
             </div>
             <div class="form-row">
               <label for="cfgLoraBw">Bandwidth (kHz):</label>
-              <select id="cfgLoraBw">
+              <select id="cfgLoraBw" onchange="previewLoraAirtime()">
                 <option value="125" selected>125 kHz (Standard EU868)</option>
                 <option value="250">250 kHz</option>
                 <option value="500">500 kHz</option>
@@ -874,7 +957,7 @@
           <div class="form-grid-2">
             <div class="form-row">
               <label for="cfgLoraCr">Coding Rate (CR):</label>
-              <select id="cfgLoraCr">
+              <select id="cfgLoraCr" onchange="previewLoraAirtime()">
                 <option value="5" selected>4/5 (Standard FEC)</option>
                 <option value="6">4/6</option>
                 <option value="7">4/7</option>
@@ -889,16 +972,32 @@
           <div class="form-grid-2">
             <div class="form-row">
               <label for="cfgLoraLdro">Low Data Rate Optimize (LDRO):</label>
-              <select id="cfgLoraLdro">
-                <option value="0" selected>Auto (Mandatory on SF11/SF12 @ 125kHz)</option>
+              <select id="cfgLoraLdro" onchange="previewLoraAirtime()">
+                <option value="0" selected>Auto (Active when Tsym &ge; 16.0 ms)</option>
                 <option value="1">Force Enabled (Always ON)</option>
                 <option value="2">Force Disabled (Always OFF)</option>
               </select>
             </div>
             <div class="form-row">
-              <label>Active Demodulator LDRO:</label>
-              <div id="ldroLiveBadge" class="badge-tag idle" style="margin-top:6px; display:inline-block; font-size:11px;">LDRO: INACTIVE</div>
+              <label>Active Demodulator LDRO &amp; ToA:</label>
+              <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">
+                <span id="ldroLiveBadge" class="badge-tag idle" style="font-size:11px;">LDRO: INACTIVE</span>
+                <span id="toaLiveBadge" class="badge-tag active" style="font-size:11px;">ToA: -- ms</span>
+              </div>
             </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgLbtRetries">LBT Hardware CAD Retries (0-10):</label>
+              <input type="number" id="cfgLbtRetries" min="0" max="10" step="1" value="4">
+            </div>
+            <div class="form-row">
+              <label for="cfgLbtBackoff">LBT Base Jitter Backoff (ms):</label>
+              <input type="number" id="cfgLbtBackoff" min="10" max="2000" step="10" value="60">
+            </div>
+          </div>
+          <div style="margin-top:6px; padding:8px 12px; border-radius:8px; background:rgba(14,165,233,0.08); border:1px solid rgba(14,165,233,0.2); font-size:0.72rem; font-family:var(--font-mono); color:var(--cyan);" id="cadLiveSummary">
+            🛡️ LBT 4-Symbol Hardware CAD (SX126X_CAD_ON_4_SYMB) Active &bull; Guard: -- ms &bull; Deferrals: 0
           </div>
           <div class="modal-actions" style="margin-top:14px;">
             <button class="btn btn-primary" onclick="saveLoraConfig()">APPLY &amp; SAVE LORA RF</button>

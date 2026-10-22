@@ -2,6 +2,11 @@
  * Tank Node Firmware — ESP32-S3 + SX1262
  * Reads 3 float-switch water levels, controls 3 parallel outflow irrigation pumps,
  * automates a remote pond charging pump via LoRa commands.
+ * Features:
+ *   - Long-distance RF (+22 dBm, SF6-SF12, Automatic LDRO engine, Dynamic ToA queue guards)
+ *   - Hardware CAD Listen-Before-Talk (4-symbol SX126X_CAD_ON_4_SYMB with jitter backoff)
+ *   - Event-driven dual-rate telemetry (Silent Idle keepalive vs Active Burst mode)
+ *   - 100% NVS-backed runtime configurability via WebSockets without rebooting
  */
 
 #include <Arduino.h>
@@ -37,7 +42,7 @@ struct __attribute__((packed)) StatusPayload {
   uint8_t water_level; 
   int16_t temperature; 
   uint8_t humidity;    
-  uint8_t reserved;
+  uint8_t reserved;    // Bits 0..2: Auto mask [P1..P3], Bit 3: Burst mode, Bit 4: LDRO active
   uint8_t run_left[3]; // Remaining minimum runtime in seconds for P1, P2, P3
   uint8_t cd_left[3];  // Remaining cooldown in seconds for P1, P2, P3
 };
@@ -60,12 +65,16 @@ struct __attribute__((packed)) LoRaPacket {
 struct LocalConfig {
   uint32_t pump_min_runtime_ms;
   uint32_t pump_min_cooldown_ms;
-  uint32_t telemetry_interval_ms;
+  uint32_t motor_stagger_ms;
+  uint32_t telemetry_idle_ms;
+  uint32_t telemetry_burst_ms;
+  uint8_t lbt_retries;
+  uint16_t lbt_backoff_ms;
   uint8_t boot_auto_mode;
   bool pump_enabled_auto[3]; 
   bool pond_enabled;         
   bool pump_manual_state[3]; 
-  bool last_demand_state;    // Stored filling state latch for the pond charger
+  bool last_demand_state;     // Stored filling state latch for the pond charger
   uint8_t debug_mode_enabled; // 1 = start WiFi hotspot on boot, 0 = keep off
   uint8_t web_always_on;      // 1 = Web server always active on boot
   char wifi_sta_ssid[33];     // optional home Wi-Fi SSID
@@ -76,7 +85,7 @@ struct LocalConfig {
   uint8_t lora_sf;
   uint16_t lora_bw_khz;
   uint8_t lora_cr;
-  uint8_t lora_ldro;          // 0 = Auto (Symbol >= 16.38ms), 1 = Force ON, 2 = Force OFF
+  uint8_t lora_ldro;          // 0 = Auto (Symbol >= 16.0ms), 1 = Force ON, 2 = Force OFF
   uint16_t lora_sync_word;
   // Reservoir Hydraulic Capacity & Refill Thresholds
   uint32_t tank_capacity_liters;
@@ -120,6 +129,7 @@ struct SystemState {
   bool radioOk = false;
   bool pcfOk = false;
   bool btnMode_edge = false;
+  uint8_t setModeExplicit = 0;        // 0=none, 1=force AUTO, 2=force MANUAL
   bool btnP1_edge = false;
   bool btnP2_edge = false;
   bool btnP3_edge = false;
@@ -129,6 +139,14 @@ struct SystemState {
   bool waterLevelValid = false; 
   bool demandActive = false;          // Mirrors tank charging cycle state
   bool triggerImmediateTelem = false; // Flag to send status telemetry immediately
+  bool burstMode = false;             // True when active burst telemetry is engaged
+  uint32_t activeTelemIntervalMs = DEFAULT_TELEM_IDLE_MS;
+  uint32_t cadBusyCount = 0;          // Number of CAD channel-busy deferrals
+  uint32_t lastCadBackoffMs = 0;      // Most recent CAD LBT jitter backoff duration
+  uint32_t txPacketCount = 0;         // Total LoRa packets transmitted since boot
+  uint32_t rxPacketCount = 0;         // Total valid LoRa packets received since boot
+  uint32_t lastTxMs = 0;              // Timestamp (millis) of most recent LoRa TX
+  uint32_t lastRxMs = 0;              // Timestamp (millis) of most recent LoRa RX
   bool psramOk = false;
   uint32_t psramTotalBytes = 0;
   uint32_t psramFreeBytes = 0;
@@ -169,6 +187,8 @@ static SemaphoreHandle_t xLogMutex = nullptr;
 static QueueHandle_t xRxQueue = nullptr;
 static QueueHandle_t xTxQueue = nullptr;
 static TaskHandle_t xControlTask = nullptr;
+static TaskHandle_t xLoRaTask = nullptr;
+static volatile bool gWsImmediateBroadcast = false;
 
 static PumpHysteresis phP1, phP2, phP3;
 
@@ -178,6 +198,7 @@ static WebSocketsServer wsServer(DEBUG_WS_PORT);
 static DNSServer dnsServer;
 static bool gDebugServerRunning = false;
 static bool gDebugServerWanted = false;
+static bool gDebugServerRestartRequested = false;
 #endif
 
 // ─── Circular System Event Log Engine ─────────────────────────────────────────
@@ -237,7 +258,11 @@ static void resetConfigToDefaults() {
   memset(&gConfig, 0, sizeof(gConfig));
   gConfig.pump_min_runtime_ms = DEFAULT_PUMP_MIN_RUNTIME_MS;
   gConfig.pump_min_cooldown_ms = DEFAULT_PUMP_MIN_COOLDOWN_MS;
-  gConfig.telemetry_interval_ms = DEFAULT_TELEMETRY_INTERVAL_MS;
+  gConfig.motor_stagger_ms = DEFAULT_MOTOR_STAGGER_MS;
+  gConfig.telemetry_idle_ms = DEFAULT_TELEM_IDLE_MS;
+  gConfig.telemetry_burst_ms = DEFAULT_TELEM_BURST_MS;
+  gConfig.lbt_retries = DEFAULT_LBT_RETRIES;
+  gConfig.lbt_backoff_ms = DEFAULT_LBT_BACKOFF_MS;
   gConfig.boot_auto_mode = 0;
   gConfig.pump_enabled_auto[0] = true;
   gConfig.pump_enabled_auto[1] = true;
@@ -270,19 +295,27 @@ static bool validateConfig(const LocalConfig &c) {
          c.pump_min_runtime_ms <= CFG_RUNTIME_MAX_MS &&
          c.pump_min_cooldown_ms >= CFG_COOLDOWN_MIN_MS &&
          c.pump_min_cooldown_ms <= CFG_COOLDOWN_MAX_MS &&
-         c.telemetry_interval_ms >= CFG_TELEM_MIN_MS &&
-         c.telemetry_interval_ms <= CFG_TELEM_MAX_MS &&
+         c.motor_stagger_ms >= CFG_STAGGER_MIN_MS &&
+         c.motor_stagger_ms <= CFG_STAGGER_MAX_MS &&
+         c.telemetry_idle_ms >= CFG_TELEM_IDLE_MIN_MS &&
+         c.telemetry_idle_ms <= CFG_TELEM_IDLE_MAX_MS &&
+         c.telemetry_burst_ms >= CFG_TELEM_BURST_MIN_MS &&
+         c.telemetry_burst_ms <= CFG_TELEM_BURST_MAX_MS &&
+         c.lbt_retries <= CFG_LBT_RETRIES_MAX &&
+         c.lbt_backoff_ms >= CFG_LBT_BACKOFF_MIN_MS &&
+         c.lbt_backoff_ms <= CFG_LBT_BACKOFF_MAX_MS &&
          c.boot_auto_mode <= 1 &&
          c.debug_mode_enabled <= 1 &&
          c.web_always_on <= 1 &&
-         c.lora_freq_hz >= 150000000UL && c.lora_freq_hz <= 960000000UL &&
-         c.lora_tx_power_dbm >= -9 && c.lora_tx_power_dbm <= 22 &&
-         c.lora_sf >= 6 && c.lora_sf <= 12 &&
+         c.lora_freq_hz >= CFG_LORA_FREQ_MIN_HZ && c.lora_freq_hz <= CFG_LORA_FREQ_MAX_HZ &&
+         c.lora_tx_power_dbm >= CFG_LORA_PWR_MIN_DBM && c.lora_tx_power_dbm <= CFG_LORA_PWR_MAX_DBM &&
+         c.lora_sf >= CFG_LORA_SF_MIN && c.lora_sf <= CFG_LORA_SF_MAX &&
          (c.lora_bw_khz == 125 || c.lora_bw_khz == 250 || c.lora_bw_khz == 500) &&
-         c.lora_cr >= 5 && c.lora_cr <= 8 &&
+         c.lora_cr >= CFG_LORA_CR_MIN && c.lora_cr <= CFG_LORA_CR_MAX &&
          c.lora_ldro <= 2 &&
-         c.refill_trigger_level <= 3 &&
-         c.refill_cutoff_level <= 3 &&
+         c.tank_capacity_liters >= CFG_CAPACITY_MIN_L && c.tank_capacity_liters <= CFG_CAPACITY_MAX_L &&
+         c.refill_trigger_level <= 2 &&
+         c.refill_cutoff_level >= 1 && c.refill_cutoff_level <= 3 &&
          c.refill_trigger_level < c.refill_cutoff_level;
 }
 
@@ -365,45 +398,128 @@ static void setPumpState(PumpHysteresis &ph, bool on, int pin) {
   digitalWrite(pin, on ? LOW : HIGH);
 }
 
-// ─── LoRa helpers ─────────────────────────────────────────────────────────────
+// ─── LoRa RF Engine: Automatic LDRO, Dynamic ToA, and Hardware CAD LBT ────────
 static void setForRx() {
   sx126x_setBufferBaseAddress(0, 0);
-  sx126x_clearIrqStatus(0x03FF);
+  sx126x_clearIrqStatus(SX126X_IRQ_ALL);
   LoRa.setLoRaPacket(SX126X_HEADER_EXPLICIT, LORA_PREAMBLE_LEN, LORA_MAX_PAYLOAD, true, true);
   LoRa.setRxGain(SX126X_RX_GAIN_BOOSTED);
   LoRa.request(SX126X_RX_CONTINUOUS);
 }
 
+static float getSymbolDurationMs() {
+  uint32_t bw = gConfig.lora_bw_khz ? gConfig.lora_bw_khz : 125;
+  return (float)(1UL << gConfig.lora_sf) / (float)bw;
+}
+
 static bool isLdroActive() {
   if (gConfig.lora_ldro == 1) return true;
   if (gConfig.lora_ldro == 2) return false;
-  // Auto mode: true whenever symbol duration >= 16.0 ms (e.g. SF11/12 at 125kHz, SF12 at 250kHz)
-  uint32_t bw = gConfig.lora_bw_khz ? gConfig.lora_bw_khz : 125;
-  float symLenMs = (float)(1UL << gConfig.lora_sf) / (float)bw;
-  return (symLenMs >= 16.0f);
+  // Auto mode: enforce LDRO whenever symbol duration T_sym = 2^SF / BW >= 16.0 ms
+  return (getSymbolDurationMs() >= LDRO_AUTO_THRESHOLD_MS);
+}
+
+static uint32_t calculatePacketToaMs(uint8_t totalBytes) {
+  float tSym = getSymbolDurationMs();
+  float tPreamble = ((float)LORA_PREAMBLE_LEN + 4.25f) * tSym;
+  int de = isLdroActive() ? 1 : 0;
+  int sf = (int)gConfig.lora_sf;
+  int cr = (int)gConfig.lora_cr; // 5..8 (representing 4/5..4/8)
+  int num = 8 * (int)totalBytes - 4 * sf + 28 + 16; // explicit header (IH=0), CRC=1 (+16)
+  int den = 4 * (sf - 2 * de);
+  if (den <= 0) den = 4;
+  int ceilVal = 0;
+  if (num > 0) {
+    ceilVal = (num + den - 1) / den;
+  }
+  float nPayload = 8.0f + (float)(ceilVal * cr);
+  float tPacket = tPreamble + nPayload * tSym;
+  return (uint32_t)(tPacket + 0.5f);
+}
+
+static uint32_t getDynamicGuardMs() {
+  uint32_t toaMs = calculatePacketToaMs(sizeof(LoRaHeader) + sizeof(StatusPayload));
+  uint32_t sfFloor = (gConfig.lora_sf >= 12) ? 1800UL :
+                     (gConfig.lora_sf == 11) ? 1200UL :
+                     (gConfig.lora_sf == 10) ? 800UL : 400UL;
+  uint32_t scaledToa = (toaMs * 3UL) / 2UL;
+  return max(sfFloor, scaledToa);
+}
+
+static bool performCadCheck4Symb() {
+  // Put SX1262 into standby RC to configure 4-symbol hardware CAD
+  LoRa.standby(SX126X_STANDBY_RC);
+  sx126x_clearIrqStatus(SX126X_IRQ_ALL);
+  // Enable CAD_DONE and CAD_DETECTED in SX1262 IRQ register (DIO masks 0 so RX ISR does not clear it)
+  sx126x_setDioIrqParams(SX126X_IRQ_CAD_DONE | SX126X_IRQ_CAD_DETECTED,
+                         SX126X_IRQ_NONE, SX126X_IRQ_NONE, SX126X_IRQ_NONE);
+
+  // Semtech AN1200.48 recommended 4-symbol CAD peak thresholds per Spreading Factor
+  uint8_t cadDetPeak = 24;
+  switch (gConfig.lora_sf) {
+    case 6:  cadDetPeak = 20; break;
+    case 7:  cadDetPeak = 22; break;
+    case 8:  cadDetPeak = 22; break;
+    case 9:  cadDetPeak = 24; break;
+    case 10: cadDetPeak = 25; break;
+    case 11: cadDetPeak = 26; break;
+    default: cadDetPeak = 28; break; // SF12
+  }
+  uint8_t cadDetMin = 10;
+
+  sx126x_setCadParams(SX126X_CAD_ON_4_SYMB, cadDetPeak, cadDetMin, SX126X_CAD_EXIT_STDBY, 0);
+  sx126x_setCad();
+
+  float symMs = getSymbolDurationMs();
+  uint32_t cadTimeoutMs = max(60UL, (uint32_t)(symMs * 8.0f + 40.0f));
+  uint32_t startMs = millis();
+  uint16_t irqStat = 0;
+
+  while ((millis() - startMs) < cadTimeoutMs) {
+    sx126x_getIrqStatus(&irqStat);
+    if (irqStat & SX126X_IRQ_CAD_DONE) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+
+  sx126x_clearIrqStatus(SX126X_IRQ_ALL);
+  return (irqStat & SX126X_IRQ_CAD_DETECTED) != 0;
 }
 
 static bool applyLoRaConfig() {
   if (!gState.radioOk) return false;
   uint32_t bwHz = (uint32_t)gConfig.lora_bw_khz * 1000UL;
   bool ldro = isLdroActive();
+
+  LoRa.standby(SX126X_STANDBY_RC);
   LoRa.setFrequency(gConfig.lora_freq_hz);
-  LoRa.setTxPower(gConfig.lora_tx_power_dbm, SX126X_TX_POWER_SX1262);
+
+  // Configure SX1262 High-Power PA for full -9 dBm to +22 dBm range with 140mA OCP
+  LoRa.setTxPower(22, SX126X_TX_POWER_SX1262);
+  LoRa.setCurrentProtection(140);
+  sx126x_setPaConfig(0x04, 0x07, 0x00, 0x01);
+  sx126x_setTxParams((uint8_t)gConfig.lora_tx_power_dbm, SX126X_PA_RAMP_800U);
+
   LoRa.setLoRaModulation(gConfig.lora_sf, bwHz, gConfig.lora_cr, ldro);
   LoRa.setSyncWord(gConfig.lora_sync_word);
   setForRx();
-  logEvent("LORA", 3, "Applied RF: %lu Hz, SF%u, BW%u kHz, CR4/%u, LDRO=%s, %d dBm, Sync 0x%04X",
+
+  uint32_t toaMs = calculatePacketToaMs(sizeof(LoRaHeader) + sizeof(StatusPayload));
+  logEvent("LORA", 3, "Applied RF: %lu Hz, SF%u, BW%u kHz, CR4/%u, LDRO=%s (Tsym=%.2fms, ToA=%lums), %d dBm, Sync 0x%04X",
            (unsigned long)gConfig.lora_freq_hz, gConfig.lora_sf, gConfig.lora_bw_khz,
-           gConfig.lora_cr, ldro ? "ON" : "OFF", gConfig.lora_tx_power_dbm, gConfig.lora_sync_word);
+           gConfig.lora_cr, ldro ? "ON" : "OFF", getSymbolDurationMs(), (unsigned long)toaMs,
+           gConfig.lora_tx_power_dbm, gConfig.lora_sync_word);
   return true;
 }
 
 static void buildStatus(LoRaPacket &pkt) {
   pkt.header = {gConfig.network_magic, gConfig.gateway_id, gConfig.node_id, MSG_STATUS};
   if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    uint8_t allowed_mask = (gState.pumpEnabledAuto[0] ? 1 : 0) |
-                           (gState.pumpEnabledAuto[1] ? 2 : 0) |
-                           (gState.pumpEnabledAuto[2] ? 4 : 0);
+    uint8_t rsvd_flags = (gState.pumpEnabledAuto[0] ? RSVD_BIT_AUTO_P1 : 0) |
+                         (gState.pumpEnabledAuto[1] ? RSVD_BIT_AUTO_P2 : 0) |
+                         (gState.pumpEnabledAuto[2] ? RSVD_BIT_AUTO_P3 : 0) |
+                         (gState.burstMode ? RSVD_BIT_BURST : 0) |
+                         (isLdroActive() ? RSVD_BIT_LDRO : 0) |
+                         (gState.pond ? RSVD_BIT_POND_ACK : 0);
     uint32_t now = millis();
     uint8_t rLeft[3] = {0, 0, 0};
     uint8_t cLeft[3] = {0, 0, 0};
@@ -420,16 +536,17 @@ static void buildStatus(LoRaPacket &pkt) {
         }
       }
     }
+    // STATUS_BIT_POND strictly reports authoritative Tank demand (gConfig.pond_enabled)
     pkt.payload.status = {
       (uint8_t)((gState.autoMode ? STATUS_BIT_AUTO : 0) |
                 (gState.pumpState[0] ? STATUS_BIT_P1 : 0) |
                 (gState.pumpState[1] ? STATUS_BIT_P2 : 0) |
                 (gState.pumpState[2] ? STATUS_BIT_P3 : 0) |
-                ((gConfig.pond_enabled || gState.pond) ? STATUS_BIT_POND : 0)), 
+                (gConfig.pond_enabled ? STATUS_BIT_POND : 0)), 
       gState.waterLevel,
       gState.temperature,
       gState.humidity,
-      allowed_mask,
+      rsvd_flags,
       {rLeft[0], rLeft[1], rLeft[2]},
       {cLeft[0], cLeft[1], cLeft[2]}
     };
@@ -440,31 +557,95 @@ static void buildStatus(LoRaPacket &pkt) {
 // ─── LoRa Manager Task (Core 0, Pri 2) ────────────────────────────────────────
 static void Task_LoRaManager(void *) {
   uint32_t lastTxEndMs = 0;
+  const uint32_t postTxTurnaroundMs = 120UL; // Fast PA/RX hardware turnaround (4-symb CAD handles airwave LBT)
   for (;;) {
     uint32_t now = millis();
-    // Guard time after transmission before next queue transmission (ensures RX continuous listening window)
-    uint32_t guardMs = (gConfig.lora_sf >= 12) ? 1800UL :
-                       (gConfig.lora_sf == 11) ? 1200UL :
-                       (gConfig.lora_sf == 10) ? 800UL : 400UL;
+    uint32_t guardMs = getDynamicGuardMs();
 
     LoRaPacket txPkt;
-    if ((now - lastTxEndMs >= guardMs) && (xQueueReceive(xTxQueue, &txPkt, 0) == pdTRUE)) {
+    if ((now - lastTxEndMs >= postTxTurnaroundMs) && (xQueueReceive(xTxQueue, &txPkt, 0) == pdTRUE)) {
+      // Coalesce/deduplicate back-to-back MSG_STATUS frames so we never transmit stale queued status packets!
+      if (txPkt.header.msg_type == MSG_STATUS) {
+        LoRaPacket peekPkt;
+        while (xQueuePeek(xTxQueue, &peekPkt, 0) == pdTRUE && peekPkt.header.msg_type == MSG_STATUS) {
+          xQueueReceive(xTxQueue, &txPkt, 0);
+        }
+        // Rebuild status snapshot at the exact millisecond of TX so payload is 100% fresh
+        buildStatus(txPkt);
+      }
+
       uint8_t payLen = (txPkt.header.msg_type == MSG_STATUS) ? (uint8_t)sizeof(StatusPayload)
                                                              : (uint8_t)sizeof(CmdPayload);
-      sx126x_setBufferBaseAddress(0, 0);
-      LoRa.setLoRaPacket(SX126X_HEADER_EXPLICIT, LORA_PREAMBLE_LEN, payLen, true, false);
-      LoRa.beginPacket();
-      LoRa.write((uint8_t *)&txPkt, sizeof(LoRaHeader) + payLen);
-      LoRa.endPacket();
-      LoRa.wait();
-      lastTxEndMs = millis();
-      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-        gState.txFlash = true;
-        xSemaphoreGive(xStateMutex);
+      uint8_t totalLen = (uint8_t)sizeof(LoRaHeader) + payLen;
+
+      // ── LISTEN-BEFORE-TALK (LBT) VIA 4-SYMBOL HARDWARE CAD ──
+      uint8_t maxRetries = gConfig.lbt_retries;
+      float symMs = getSymbolDurationMs();
+      for (uint8_t attempt = 0; attempt <= maxRetries; attempt++) {
+        bool channelBusy = performCadCheck4Symb();
+        if (!channelBusy) {
+          break; // Airwaves clear of LoRa chirps -> proceed to transmit
+        }
+
+        // SX126X_IRQ_CAD_DETECTED raised -> channel is active
+        uint32_t symScaleMs = (uint32_t)(symMs * 6.0f + 0.5f);
+        uint32_t baseBackoff = max((uint32_t)gConfig.lbt_backoff_ms, symScaleMs);
+        uint32_t jitter = (esp_random() % (baseBackoff + 60UL)) + (uint32_t)(symMs * 2.0f);
+        uint32_t backoffMs = baseBackoff + jitter;
+
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+          gState.cadBusyCount++;
+          gState.lastCadBackoffMs = backoffMs;
+          xSemaphoreGive(xStateMutex);
+        }
+
+        if (attempt < maxRetries) {
+          // Return transceiver to RX_CONTINUOUS during backoff so incoming packet is captured
+          setForRx();
+          logEvent("LORA", 1, "LBT CAD detected LoRa chirp! Backoff %lu ms (Retry %u/%u)",
+                   (unsigned long)backoffMs, attempt + 1, maxRetries);
+          vTaskDelay(pdMS_TO_TICKS(backoffMs));
+        } else {
+          logEvent("LORA", 1, "LBT CAD max retries (%u) reached — transmitting frame", maxRetries);
+        }
       }
-      Serial.printf("\n[LoRa TX] type=%u target=0x%02X (Guard=%lums)\n", txPkt.header.msg_type, txPkt.header.target_id, guardMs);
+
+      // If we backed off and state changed in the meantime, refresh MSG_STATUS payload right before TX
+      if (txPkt.header.msg_type == MSG_STATUS) {
+        buildStatus(txPkt);
+      }
+
+      // ── PACKET TRANSMISSION ──
+      uint32_t toaMs = calculatePacketToaMs(totalLen);
+      sx126x_setBufferBaseAddress(0, 0);
+      LoRa.setLoRaPacket(SX126X_HEADER_EXPLICIT, LORA_PREAMBLE_LEN, totalLen, true, false);
+      LoRa.beginPacket();
+      LoRa.write((uint8_t *)&txPkt, totalLen);
+      LoRa.endPacket();
+
+      // Non-blocking RTOS wait loop so Core 0 yields to Wi-Fi / WebServer during high-SF airtime
+      uint32_t txWaitStart = millis();
+      uint32_t txMaxWaitMs = toaMs + 500UL;
+      while (!LoRa.wait(1) && (millis() - txWaitStart < txMaxWaitMs)) {
+        vTaskDelay(pdMS_TO_TICKS(3));
+      }
+      lastTxEndMs = millis();
+
+      // Immediately return transceiver to SX126X_RX_CONTINUOUS
       setForRx();
       LoRa.purge(LoRa.available());
+
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        gState.txFlash = true;
+        gState.txPacketCount++;
+        gState.lastTxMs = lastTxEndMs;
+        xSemaphoreGive(xStateMutex);
+      }
+      gWsImmediateBroadcast = true;
+      Serial.printf("\n[LoRa TX #%lu] type=%u target=0x%02X SF%u BW%u LDRO=%d (ToA=%lums, Guard=%lums)\n",
+                    (unsigned long)gState.txPacketCount, txPkt.header.msg_type, txPkt.header.target_id, gConfig.lora_sf,
+                    gConfig.lora_bw_khz, isLdroActive() ? 1 : 0,
+                    (unsigned long)toaMs, (unsigned long)guardMs);
     }
 
     uint8_t avail = LoRa.available();
@@ -475,7 +656,7 @@ static void Task_LoRaManager(void *) {
       while (LoRa.available() && n < (uint8_t)sizeof(rxPkt)) p[n++] = LoRa.read();
       while (LoRa.available()) LoRa.read(); 
       
-      printf("\n[LoRa RX] type=%u len=%u rssi=%d snr=%d\n", rxPkt.header.msg_type, n, LoRa.packetRssi(), LoRa.snr());
+      printf("\n[LoRa RX] type=%u len=%u rssi=%d snr=%d\n", rxPkt.header.msg_type, n, LoRa.packetRssi(), (int)LoRa.snr());
       printf("Packet: ");
       for (int i = 0; i < n; i++) printf("%02X ", p[i]);
       printf("\n");
@@ -488,8 +669,11 @@ static void Task_LoRaManager(void *) {
           gState.lastRssi = (int16_t)LoRa.packetRssi();
           gState.lastSnr = (int8_t)LoRa.snr();
           gState.rxFlash = true;
+          gState.rxPacketCount++;
+          gState.lastRxMs = millis();
           xSemaphoreGive(xStateMutex);
         }
+        gWsImmediateBroadcast = true;
         xQueueSend(xRxQueue, &rxPkt, 0);
         if (xControlTask) xTaskNotifyGive(xControlTask);
       }
@@ -498,18 +682,23 @@ static void Task_LoRaManager(void *) {
     uint8_t st = LoRa.status();
     if (st == SX126X_STATUS_CRC_ERR || st == SX126X_STATUS_HEADER_ERR) setForRx();
 
-    vTaskDelay(pdMS_TO_TICKS(LORA_POLL_MS));
+    // Wake immediately when Task_ControlEngine queues a packet, or poll RX every 10ms
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
   }
 }
 
-// ─── Debug Web / WebSocket Server (Core 0, Pri 1) ─────────────────────────────
+// ─── Debug Web / WebSocket Server (Core 0, Pri 2) ─────────────────────────────
 #if ENABLE_DEBUG_WEB
 
 static void broadcastTelemetryWs() {
   if (!gDebugServerRunning) return;
-  char buf[1280];
+  char buf[1720];
   uint8_t wl = 0, raw_wl = 0, pcf_raw = 0xFF, ec = 0;
   bool am = false, pond = false, demand = false, pcfOk = false, wlValid = false, radioOk = false;
+  bool burstMode = false;
+  uint32_t activeTelemMs = DEFAULT_TELEM_IDLE_MS;
+  uint32_t cadBusyCnt = 0, lastCadBackoff = 0;
+  uint32_t txCnt = 0, rxCnt = 0, lastTxMs = 0, lastRxMs = 0;
   bool ps[3] = {}, pea[3] = {};
   uint32_t lastOn[3] = {}, lastOff[3] = {};
   uint8_t pOverride[3] = {};
@@ -529,6 +718,14 @@ static void broadcastTelemetryWs() {
     ec = gState.errorCode;
     pcfOk = gState.pcfOk;
     radioOk = gState.radioOk;
+    burstMode = gState.burstMode;
+    activeTelemMs = gState.activeTelemIntervalMs;
+    cadBusyCnt = gState.cadBusyCount;
+    lastCadBackoff = gState.lastCadBackoffMs;
+    txCnt = gState.txPacketCount;
+    rxCnt = gState.rxPacketCount;
+    lastTxMs = gState.lastTxMs;
+    lastRxMs = gState.lastRxMs;
     temp = gState.temperature;
     hum = gState.humidity;
     for (int i = 0; i < 3; i++) {
@@ -546,6 +743,8 @@ static void broadcastTelemetryWs() {
   }
 
   uint32_t now = millis();
+  long lastTxAgo = (lastTxMs > 0 && now >= lastTxMs) ? (long)((now - lastTxMs) / 1000UL) : -1L;
+  long lastRxAgo = (lastRxMs > 0 && now >= lastRxMs) ? (long)((now - lastRxMs) / 1000UL) : -1L;
   uint32_t runLeft[3] = {}, cdLeft[3] = {}, timedLeft[3] = {};
   for (int i = 0; i < 3; i++) {
     if (ps[i] && lastOn[i] > 0) {
@@ -575,6 +774,10 @@ static void broadcastTelemetryWs() {
   uint8_t bP3 = (pcf_raw & 0x40) ? 1 : 0;
   uint8_t bPond = (pcf_raw & 0x80) ? 1 : 0;
 
+  uint32_t toaMs = calculatePacketToaMs(sizeof(LoRaHeader) + sizeof(StatusPayload));
+  float symMs = getSymbolDurationMs();
+  uint32_t guardMs = getDynamicGuardMs();
+
   snprintf(buf, sizeof(buf),
     "{\"type\":\"telemetry\",\"wl\":%u,\"raw_wl\":%u,\"wl_valid\":%d,\"mode\":\"%s\","
     "\"pcf_raw\":%u,\"pcf_ok\":%d,\"floats\":[%u,%u,%u],\"buttons\":[%u,%u,%u,%u,%u],"
@@ -585,10 +788,13 @@ static void broadcastTelemetryWs() {
     "\"temp\":%.1f,\"hum\":%u,\"rssi\":%d,\"snr\":%d,\"radio_ok\":%d,"
     "\"heap\":%lu,\"min_heap\":%lu,\"cpu_mhz\":%u,\"uptime\":%lu,\"boots\":%lu,"
     "\"sta\":%d,\"sta_ip\":\"%s\",\"sta_rssi\":%d,\"ap_clients\":%u,"
-    "\"cfg_runtime\":%lu,\"cfg_cooldown\":%lu,\"cfg_telem\":%lu,\"always_on\":%u,"
-    "\"tank_capacity\":%lu,\"refill_trigger\":%u,\"refill_cutoff\":%u,"
+    "\"cfg_runtime\":%lu,\"cfg_cooldown\":%lu,\"cfg_stagger\":%lu,"
+    "\"cfg_telem\":%lu,\"cfg_telem_idle\":%lu,\"cfg_telem_burst\":%lu,\"burst_mode\":%u,"
+    "\"lbt_retries\":%u,\"lbt_backoff\":%u,\"cad_busy_cnt\":%lu,\"last_cad_backoff\":%lu,"
+    "\"tx_cnt\":%lu,\"rx_cnt\":%lu,\"last_tx_ago\":%ld,\"last_rx_ago\":%ld,"
+    "\"always_on\":%u,\"tank_capacity\":%lu,\"refill_trigger\":%u,\"refill_cutoff\":%u,"
     "\"lora_freq\":%lu,\"lora_power\":%d,\"lora_sf\":%u,\"lora_bw\":%u,\"lora_cr\":%u,"
-    "\"lora_ldro\":%u,\"ldro_active\":%u}",
+    "\"lora_ldro\":%u,\"ldro_active\":%u,\"toa_ms\":%lu,\"sym_ms\":%.2f,\"guard_ms\":%lu}",
     wl, raw_wl, wlValid ? 1 : 0, am ? "AUTO" : "MAN",
     pcf_raw, pcfOk ? 1 : 0, f1, f2, f3, bMode, bP1, bP2, bP3, bPond,
     ps[0], ps[1], ps[2], RELAY_P1, RELAY_P2, RELAY_P3, pea[0], pea[1], pea[2],
@@ -608,7 +814,19 @@ static void broadcastTelemetryWs() {
     (unsigned)WiFi.softAPgetStationNum(),
     (unsigned long)gConfig.pump_min_runtime_ms,
     (unsigned long)gConfig.pump_min_cooldown_ms,
-    (unsigned long)gConfig.telemetry_interval_ms,
+    (unsigned long)gConfig.motor_stagger_ms,
+    (unsigned long)activeTelemMs,
+    (unsigned long)gConfig.telemetry_idle_ms,
+    (unsigned long)gConfig.telemetry_burst_ms,
+    burstMode ? 1 : 0,
+    gConfig.lbt_retries,
+    gConfig.lbt_backoff_ms,
+    (unsigned long)cadBusyCnt,
+    (unsigned long)lastCadBackoff,
+    (unsigned long)txCnt,
+    (unsigned long)rxCnt,
+    lastTxAgo,
+    lastRxAgo,
     gConfig.web_always_on,
     (unsigned long)gConfig.tank_capacity_liters,
     gConfig.refill_trigger_level,
@@ -619,7 +837,10 @@ static void broadcastTelemetryWs() {
     gConfig.lora_bw_khz,
     gConfig.lora_cr,
     gConfig.lora_ldro,
-    isLdroActive() ? 1 : 0
+    isLdroActive() ? 1 : 0,
+    (unsigned long)toaMs,
+    symMs,
+    (unsigned long)guardMs
   );
   wsServer.broadcastTXT(buf);
 }
@@ -642,18 +863,31 @@ static void sendLogsWs(uint8_t num) {
   }
 }
 
-static void sendConfigWs(uint8_t num) {
-  char buf[512];
+static void sendConfigWs(uint8_t num, bool broadcastAll = false) {
+  char buf[768];
+  uint32_t toaMs = calculatePacketToaMs(sizeof(LoRaHeader) + sizeof(StatusPayload));
+  float symMs = getSymbolDurationMs();
+  uint32_t guardMs = getDynamicGuardMs();
+
   snprintf(buf, sizeof(buf),
-    "{\"type\":\"config\",\"runtime\":%lu,\"cooldown\":%lu,\"telem\":%lu,"
+    "{\"type\":\"config\",\"runtime\":%lu,\"cooldown\":%lu,\"stagger\":%lu,"
+    "\"telem\":%lu,\"telem_idle\":%lu,\"telem_burst\":%lu,"
+    "\"lbt_retries\":%u,\"lbt_backoff\":%u,"
     "\"boot_auto\":%u,\"debug\":%u,\"always_on\":%u,\"sta_ssid\":\"%s\","
     "\"ap_ip\":\"%s\",\"sta_ip\":\"%s\","
     "\"lora_freq\":%lu,\"lora_power\":%d,\"lora_sf\":%u,\"lora_bw\":%u,"
     "\"lora_cr\":%u,\"lora_sync\":\"0x%04X\",\"lora_ldro\":%u,\"ldro_active\":%u,"
-    "\"tank_capacity\":%lu,\"refill_trigger\":%u,\"refill_cutoff\":%u}",
+    "\"toa_ms\":%lu,\"sym_ms\":%.2f,\"guard_ms\":%lu,"
+    "\"tank_capacity\":%lu,\"refill_trigger\":%u,\"refill_cutoff\":%u,"
+    "\"auto_mask\":[%d,%d,%d]}",
     (unsigned long)gConfig.pump_min_runtime_ms,
     (unsigned long)gConfig.pump_min_cooldown_ms,
-    (unsigned long)gConfig.telemetry_interval_ms,
+    (unsigned long)gConfig.motor_stagger_ms,
+    (unsigned long)gConfig.telemetry_idle_ms,
+    (unsigned long)gConfig.telemetry_idle_ms,
+    (unsigned long)gConfig.telemetry_burst_ms,
+    gConfig.lbt_retries,
+    gConfig.lbt_backoff_ms,
     gConfig.boot_auto_mode,
     gConfig.debug_mode_enabled,
     gConfig.web_always_on,
@@ -668,11 +902,45 @@ static void sendConfigWs(uint8_t num) {
     gConfig.lora_sync_word,
     gConfig.lora_ldro,
     isLdroActive() ? 1 : 0,
+    (unsigned long)toaMs,
+    symMs,
+    (unsigned long)guardMs,
     (unsigned long)gConfig.tank_capacity_liters,
     gConfig.refill_trigger_level,
-    gConfig.refill_cutoff_level
+    gConfig.refill_cutoff_level,
+    gConfig.pump_enabled_auto[0] ? 1 : 0,
+    gConfig.pump_enabled_auto[1] ? 1 : 0,
+    gConfig.pump_enabled_auto[2] ? 1 : 0
   );
-  wsServer.sendTXT(num, buf);
+  if (broadcastAll) wsServer.broadcastTXT(buf);
+  else wsServer.sendTXT(num, buf);
+}
+
+static bool parseMask3(const String &msg, const char *key, bool &p1, bool &p2, bool &p3) {
+  int kIdx = msg.indexOf(key);
+  if (kIdx < 0) return false;
+  int bOpen = msg.indexOf('[', kIdx);
+  if (bOpen < 0) return false;
+  int bClose = msg.indexOf(']', bOpen);
+  if (bClose <= bOpen) return false;
+  String inside = msg.substring(bOpen + 1, bClose);
+  int v1 = -1, v2 = -1, v3 = -1;
+  int c1 = inside.indexOf(',');
+  if (c1 >= 0) {
+    v1 = inside.substring(0, c1).toInt();
+    int c2 = inside.indexOf(',', c1 + 1);
+    if (c2 >= 0) {
+      v2 = inside.substring(c1 + 1, c2).toInt();
+      v3 = inside.substring(c2 + 1).toInt();
+    }
+  }
+  if (v1 >= 0 && v2 >= 0 && v3 >= 0) {
+    p1 = (v1 != 0);
+    p2 = (v2 != 0);
+    p3 = (v3 != 0);
+    return true;
+  }
+  return false;
 }
 
 static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
@@ -680,12 +948,14 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
     IPAddress ip = wsServer.remoteIP(num);
     Serial.printf("[DebugWS] Client #%u connected from %s\n", num, ip.toString().c_str());
     sendConfigWs(num);
+    gWsImmediateBroadcast = true;
   } else if (type == WStype_DISCONNECTED) {
     Serial.printf("[DebugWS] Client #%u disconnected\n", num);
   } else if (type == WStype_TEXT) {
     String msg = String((char *)payload);
     if (msg.indexOf("\"cmd\":\"get_config\"") >= 0) {
       sendConfigWs(num);
+      gWsImmediateBroadcast = true;
     } else if (msg.indexOf("\"cmd\":\"get_logs\"") >= 0) {
       sendLogsWs(num);
     } else if (msg.indexOf("\"cmd\":\"clear_logs\"") >= 0) {
@@ -696,29 +966,67 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
       }
       logEvent("SYS", 0, "System logs cleared by operator");
       wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Event Logs Cleared!\",\"is_err\":false}");
-    } else if (msg.indexOf("\"cmd\":\"mode\"") >= 0) {
+    } else if (msg.indexOf("\"cmd\":\"tx_now\"") >= 0) {
+      LoRaPacket tx = {};
+      buildStatus(tx);
+      xQueueSend(xTxQueue, &tx, 0);
+      if (xLoRaTask) xTaskNotifyGive(xLoRaTask);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"LoRa Status Beacon Dispatched!\",\"is_err\":false}");
+    } else if (msg.indexOf("\"cmd\":\"reset_overrides\"") >= 0) {
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        gState.btnMode_edge = true;
+        for (int i = 0; i < 3; i++) {
+          gState.pumpOverride[i] = PUMP_OVERRIDE_AUTO;
+          gState.pumpTimedUntil[i] = 0;
+        }
+        gState.triggerImmediateTelem = true;
         xSemaphoreGive(xStateMutex);
       }
       if (xControlTask) xTaskNotifyGive(xControlTask);
+      gWsImmediateBroadcast = true;
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"All Pump Overrides Reset to AUTO!\",\"is_err\":false}");
+    } else if (msg.indexOf("\"cmd\":\"mode\"") >= 0) {
+      int vIdx = msg.indexOf("\"val\":");
+      if (vIdx >= 0) {
+        bool wantAuto = (msg.substring(vIdx + 6).toInt() != 0);
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          gState.setModeExplicit = wantAuto ? 1 : 2;
+          xSemaphoreGive(xStateMutex);
+        }
+      } else {
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          gState.btnMode_edge = true;
+          xSemaphoreGive(xStateMutex);
+        }
+      }
+      if (xControlTask) xTaskNotifyGive(xControlTask);
+      gWsImmediateBroadcast = true;
     } else if (msg.indexOf("\"cmd\":\"pond\"") >= 0) {
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         gState.btnPond_edge = true;
         xSemaphoreGive(xStateMutex);
       }
       if (xControlTask) xTaskNotifyGive(xControlTask);
+      gWsImmediateBroadcast = true;
     } else if (msg.indexOf("\"cmd\":\"pump\"") >= 0) {
       int idIdx = msg.indexOf("\"id\":");
       if (idIdx >= 0) {
         int pId = msg.substring(idIdx + 5).toInt();
-        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-          if (pId == 1) gState.btnP1_edge = true;
-          else if (pId == 2) gState.btnP2_edge = true;
-          else if (pId == 3) gState.btnP3_edge = true;
-          xSemaphoreGive(xStateMutex);
+        if (pId >= 1 && pId <= 3) {
+          int idx = pId - 1;
+          if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            // Clear any conflicting manual override so toggle button always actuates cleanly
+            if (!gState.autoMode) {
+              gState.pumpOverride[idx] = PUMP_OVERRIDE_AUTO;
+              gState.pumpTimedUntil[idx] = 0;
+            }
+            if (pId == 1) gState.btnP1_edge = true;
+            else if (pId == 2) gState.btnP2_edge = true;
+            else if (pId == 3) gState.btnP3_edge = true;
+            xSemaphoreGive(xStateMutex);
+          }
+          if (xControlTask) xTaskNotifyGive(xControlTask);
+          gWsImmediateBroadcast = true;
         }
-        if (xControlTask) xTaskNotifyGive(xControlTask);
       }
     } else if (msg.indexOf("\"cmd\":\"set_pump_override\"") >= 0) {
       int idIdx = msg.indexOf("\"id\":");
@@ -752,7 +1060,7 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
               char toast[128];
               snprintf(toast, sizeof(toast), "{\"type\":\"toast\",\"msg\":\"Cannot start P%d: Tank is EMPTY (Cavitation Protection)\",\"is_err\":true}", pId);
               wsServer.sendTXT(num, toast);
-            } else if (!canChangePumpState(*phArr[idx], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+            } else if (!phArr[idx]->state && !canChangePumpState(*phArr[idx], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
               uint32_t el = (phArr[idx]->lastOffTime > 0) ? (nowMs - phArr[idx]->lastOffTime) : 0;
               uint32_t cdRem = (el < gConfig.pump_min_cooldown_ms) ? (gConfig.pump_min_cooldown_ms - el) / 1000 : 0;
               char toast[128];
@@ -775,7 +1083,7 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
               wsServer.sendTXT(num, toast);
             }
           } else if (mStr == "FORCE_OFF") {
-            if (!canChangePumpState(*phArr[idx], false, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+            if (phArr[idx]->state && !canChangePumpState(*phArr[idx], false, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
               uint32_t el = (phArr[idx]->lastOnTime > 0) ? (nowMs - phArr[idx]->lastOnTime) : 0;
               uint32_t runRem = (el < gConfig.pump_min_runtime_ms) ? (gConfig.pump_min_runtime_ms - el) / 1000 : 0;
               char toast[128];
@@ -808,30 +1116,34 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
         }
       }
     } else if (msg.indexOf("\"cmd\":\"set_auto_mask\"") >= 0) {
-      int mIdx = msg.indexOf("\"mask\":[");
-      if (mIdx >= 0) {
-        int p1 = msg.charAt(mIdx + 8) - '0';
-        int p2 = msg.charAt(mIdx + 10) - '0';
-        int p3 = msg.charAt(mIdx + 12) - '0';
+      bool m1 = false, m2 = false, m3 = false;
+      if (parseMask3(msg, "\"mask\"", m1, m2, m3)) {
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-          gState.pumpEnabledAuto[0] = (p1 == 1);
-          gState.pumpEnabledAuto[1] = (p2 == 1);
-          gState.pumpEnabledAuto[2] = (p3 == 1);
-          gConfig.pump_enabled_auto[0] = gState.pumpEnabledAuto[0];
-          gConfig.pump_enabled_auto[1] = gState.pumpEnabledAuto[1];
-          gConfig.pump_enabled_auto[2] = gState.pumpEnabledAuto[2];
+          gState.pumpEnabledAuto[0] = m1;
+          gState.pumpEnabledAuto[1] = m2;
+          gState.pumpEnabledAuto[2] = m3;
+          gConfig.pump_enabled_auto[0] = m1;
+          gConfig.pump_enabled_auto[1] = m2;
+          gConfig.pump_enabled_auto[2] = m3;
           gState.triggerImmediateTelem = true;
           xSemaphoreGive(xStateMutex);
           saveConfig();
         }
         if (xControlTask) xTaskNotifyGive(xControlTask);
+        sendConfigWs(num, true);
+        wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Auto Pump Masks Saved!\",\"is_err\":false}");
       }
     } else if (msg.indexOf("\"cmd\":\"set_config\"") >= 0) {
       int rIdx = msg.indexOf("\"runtime\":");
       int cIdx = msg.indexOf("\"cooldown\":");
+      int stIdx = msg.indexOf("\"stagger\":");
+      int tiIdx = msg.indexOf("\"telem_idle\":");
+      int tbIdx = msg.indexOf("\"telem_burst\":");
       int tIdx = msg.indexOf("\"telem\":");
       int bIdx = msg.indexOf("\"boot_auto\":");
       int aIdx = msg.indexOf("\"always_on\":");
+      int mIdx = msg.indexOf("\"auto_mask\":[");
+
       if (rIdx >= 0) {
         uint32_t v = msg.substring(rIdx + 10).toInt();
         if (v >= CFG_RUNTIME_MIN_MS && v <= CFG_RUNTIME_MAX_MS) gConfig.pump_min_runtime_ms = v;
@@ -840,9 +1152,20 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
         uint32_t v = msg.substring(cIdx + 11).toInt();
         if (v >= CFG_COOLDOWN_MIN_MS && v <= CFG_COOLDOWN_MAX_MS) gConfig.pump_min_cooldown_ms = v;
       }
-      if (tIdx >= 0) {
+      if (stIdx >= 0) {
+        uint32_t v = msg.substring(stIdx + 10).toInt();
+        if (v >= CFG_STAGGER_MIN_MS && v <= CFG_STAGGER_MAX_MS) gConfig.motor_stagger_ms = v;
+      }
+      if (tiIdx >= 0) {
+        uint32_t v = msg.substring(tiIdx + 13).toInt();
+        if (v >= CFG_TELEM_IDLE_MIN_MS && v <= CFG_TELEM_IDLE_MAX_MS) gConfig.telemetry_idle_ms = v;
+      } else if (tIdx >= 0) {
         uint32_t v = msg.substring(tIdx + 8).toInt();
-        if (v >= CFG_TELEM_MIN_MS && v <= CFG_TELEM_MAX_MS) gConfig.telemetry_interval_ms = v;
+        if (v >= CFG_TELEM_IDLE_MIN_MS && v <= CFG_TELEM_IDLE_MAX_MS) gConfig.telemetry_idle_ms = v;
+      }
+      if (tbIdx >= 0) {
+        uint32_t v = msg.substring(tbIdx + 14).toInt();
+        if (v >= CFG_TELEM_BURST_MIN_MS && v <= CFG_TELEM_BURST_MAX_MS) gConfig.telemetry_burst_ms = v;
       }
       if (bIdx >= 0) {
         uint8_t v = msg.substring(bIdx + 12).toInt();
@@ -855,9 +1178,29 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
           gConfig.debug_mode_enabled = a;
         }
       }
+      if (mIdx >= 0) {
+        int p1 = msg.charAt(mIdx + 13) - '0';
+        int p2 = msg.charAt(mIdx + 15) - '0';
+        int p3 = msg.charAt(mIdx + 17) - '0';
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          gState.pumpEnabledAuto[0] = (p1 == 1);
+          gState.pumpEnabledAuto[1] = (p2 == 1);
+          gState.pumpEnabledAuto[2] = (p3 == 1);
+          gConfig.pump_enabled_auto[0] = gState.pumpEnabledAuto[0];
+          gConfig.pump_enabled_auto[1] = gState.pumpEnabledAuto[1];
+          gConfig.pump_enabled_auto[2] = gState.pumpEnabledAuto[2];
+          gState.triggerImmediateTelem = true;
+          xSemaphoreGive(xStateMutex);
+        }
+      }
       saveConfig(true);
-      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Config Saved to Flash!\",\"is_err\":false}");
-      sendConfigWs(num);
+      logEvent("SYS", 3, "Timings saved: Run=%lums, Cd=%lums, Stagger=%lums, Idle=%lums, Burst=%lums",
+               (unsigned long)gConfig.pump_min_runtime_ms, (unsigned long)gConfig.pump_min_cooldown_ms,
+               (unsigned long)gConfig.motor_stagger_ms, (unsigned long)gConfig.telemetry_idle_ms,
+               (unsigned long)gConfig.telemetry_burst_ms);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Timing & Telemetry Parameters Saved!\",\"is_err\":false}");
+      sendConfigWs(num, true);
+      if (xControlTask) xTaskNotifyGive(xControlTask);
     } else if (msg.indexOf("\"cmd\":\"set_lora_config\"") >= 0) {
       int fIdx = msg.indexOf("\"freq\":");
       int pIdx = msg.indexOf("\"power\":");
@@ -866,17 +1209,20 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
       int crIdx = msg.indexOf("\"cr\":");
       int ldIdx = msg.indexOf("\"ldro\":");
       int syIdx = msg.indexOf("\"sync\":");
+      int lrIdx = msg.indexOf("\"lbt_retries\":");
+      int lbIdx = msg.indexOf("\"lbt_backoff\":");
+
       if (fIdx >= 0) {
         uint32_t f = msg.substring(fIdx + 7).toInt();
-        if (f >= 150000000UL && f <= 960000000UL) gConfig.lora_freq_hz = f;
+        if (f >= CFG_LORA_FREQ_MIN_HZ && f <= CFG_LORA_FREQ_MAX_HZ) gConfig.lora_freq_hz = f;
       }
       if (pIdx >= 0) {
         int8_t p = msg.substring(pIdx + 8).toInt();
-        if (p >= -9 && p <= 22) gConfig.lora_tx_power_dbm = p;
+        if (p >= CFG_LORA_PWR_MIN_DBM && p <= CFG_LORA_PWR_MAX_DBM) gConfig.lora_tx_power_dbm = p;
       }
       if (sfIdx >= 0) {
         uint8_t sf = msg.substring(sfIdx + 5).toInt();
-        if (sf >= 6 && sf <= 12) gConfig.lora_sf = sf;
+        if (sf >= CFG_LORA_SF_MIN && sf <= CFG_LORA_SF_MAX) gConfig.lora_sf = sf;
       }
       if (bwIdx >= 0) {
         uint16_t bw = msg.substring(bwIdx + 5).toInt();
@@ -884,7 +1230,7 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
       }
       if (crIdx >= 0) {
         uint8_t cr = msg.substring(crIdx + 5).toInt();
-        if (cr >= 5 && cr <= 8) gConfig.lora_cr = cr;
+        if (cr >= CFG_LORA_CR_MIN && cr <= CFG_LORA_CR_MAX) gConfig.lora_cr = cr;
       }
       if (ldIdx >= 0) {
         uint8_t ld = msg.substring(ldIdx + 7).toInt();
@@ -901,31 +1247,104 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
           }
         }
       }
+      if (lrIdx >= 0) {
+        uint8_t lr = msg.substring(lrIdx + 14).toInt();
+        if (lr <= CFG_LBT_RETRIES_MAX) gConfig.lbt_retries = lr;
+      }
+      if (lbIdx >= 0) {
+        uint16_t lb = msg.substring(lbIdx + 14).toInt();
+        if (lb >= CFG_LBT_BACKOFF_MIN_MS && lb <= CFG_LBT_BACKOFF_MAX_MS) gConfig.lbt_backoff_ms = lb;
+      }
+
       saveConfig(true);
       applyLoRaConfig();
-      sendConfigWs(num);
-      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"LoRa RF Config Applied & Saved!\",\"is_err\":false}");
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        gState.triggerImmediateTelem = true;
+        xSemaphoreGive(xStateMutex);
+      }
+      if (xControlTask) xTaskNotifyGive(xControlTask);
+      gWsImmediateBroadcast = true;
+      sendConfigWs(num, true);
+      char toast[160];
+      snprintf(toast, sizeof(toast),
+        "{\"type\":\"toast\",\"msg\":\"LoRa Applied: SF%u BW%u %ddBm LDRO=%s (ToA=%lums)\",\"is_err\":false}",
+        gConfig.lora_sf, gConfig.lora_bw_khz, gConfig.lora_tx_power_dbm,
+        isLdroActive() ? "ON" : "OFF",
+        (unsigned long)calculatePacketToaMs(sizeof(LoRaHeader) + sizeof(StatusPayload)));
+      wsServer.sendTXT(num, toast);
     } else if (msg.indexOf("\"cmd\":\"set_hydraulic_config\"") >= 0) {
       int cIdx = msg.indexOf("\"capacity\":");
       int trIdx = msg.indexOf("\"trigger\":");
       int ctIdx = msg.indexOf("\"cutoff\":");
+      int rIdx = msg.indexOf("\"runtime\":");
+      int cdIdx = msg.indexOf("\"cooldown\":");
+      int stIdx = msg.indexOf("\"stagger\":");
+      int tiIdx = msg.indexOf("\"telem_idle\":");
+      int tbIdx = msg.indexOf("\"telem_burst\":");
+      int bIdx = msg.indexOf("\"boot_auto\":");
+      int mIdx = msg.indexOf("\"auto_mask\":[");
+
       if (cIdx >= 0) {
         uint32_t c = msg.substring(cIdx + 11).toInt();
-        if (c >= 100 && c <= 1000000UL) gConfig.tank_capacity_liters = c;
+        if (c >= CFG_CAPACITY_MIN_L && c <= CFG_CAPACITY_MAX_L) gConfig.tank_capacity_liters = c;
       }
       if (trIdx >= 0) {
         uint8_t tr = msg.substring(trIdx + 10).toInt();
-        if (tr <= 3) gConfig.refill_trigger_level = tr;
+        if (tr <= 2) gConfig.refill_trigger_level = tr;
       }
       if (ctIdx >= 0) {
         uint8_t ct = msg.substring(ctIdx + 9).toInt();
-        if (ct <= 3 && ct > gConfig.refill_trigger_level) gConfig.refill_cutoff_level = ct;
+        if (ct >= 1 && ct <= 3 && ct > gConfig.refill_trigger_level) gConfig.refill_cutoff_level = ct;
+      }
+      if (rIdx >= 0) {
+        uint32_t v = msg.substring(rIdx + 10).toInt();
+        if (v >= CFG_RUNTIME_MIN_MS && v <= CFG_RUNTIME_MAX_MS) gConfig.pump_min_runtime_ms = v;
+      }
+      if (cdIdx >= 0) {
+        uint32_t v = msg.substring(cdIdx + 11).toInt();
+        if (v >= CFG_COOLDOWN_MIN_MS && v <= CFG_COOLDOWN_MAX_MS) gConfig.pump_min_cooldown_ms = v;
+      }
+      if (stIdx >= 0) {
+        uint32_t v = msg.substring(stIdx + 10).toInt();
+        if (v >= CFG_STAGGER_MIN_MS && v <= CFG_STAGGER_MAX_MS) gConfig.motor_stagger_ms = v;
+      }
+      if (tiIdx >= 0) {
+        uint32_t v = msg.substring(tiIdx + 13).toInt();
+        if (v >= CFG_TELEM_IDLE_MIN_MS && v <= CFG_TELEM_IDLE_MAX_MS) gConfig.telemetry_idle_ms = v;
+      }
+      if (tbIdx >= 0) {
+        uint32_t v = msg.substring(tbIdx + 14).toInt();
+        if (v >= CFG_TELEM_BURST_MIN_MS && v <= CFG_TELEM_BURST_MAX_MS) gConfig.telemetry_burst_ms = v;
+      }
+      if (bIdx >= 0) {
+        uint8_t v = msg.substring(bIdx + 12).toInt();
+        if (v <= 1) gConfig.boot_auto_mode = v;
+      }
+      bool m1 = false, m2 = false, m3 = false;
+      if (parseMask3(msg, "\"auto_mask\"", m1, m2, m3)) {
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          gState.pumpEnabledAuto[0] = m1;
+          gState.pumpEnabledAuto[1] = m2;
+          gState.pumpEnabledAuto[2] = m3;
+          gConfig.pump_enabled_auto[0] = m1;
+          gConfig.pump_enabled_auto[1] = m2;
+          gConfig.pump_enabled_auto[2] = m3;
+          xSemaphoreGive(xStateMutex);
+        }
       }
       saveConfig(true);
-      sendConfigWs(num);
-      logEvent("HYDR", 3, "Updated capacity: %lu L, Refill trigger: L%u, Cutoff: L%u",
-               (unsigned long)gConfig.tank_capacity_liters, gConfig.refill_trigger_level, gConfig.refill_cutoff_level);
-      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Hydraulic Parameters Saved!\",\"is_err\":false}");
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        gState.triggerImmediateTelem = true;
+        xSemaphoreGive(xStateMutex);
+      }
+      if (xControlTask) xTaskNotifyGive(xControlTask);
+      gWsImmediateBroadcast = true;
+      sendConfigWs(num, true);
+      logEvent("HYDR", 3, "Saved Hydraulics & Timings: Cap=%luL, L%u->L%u, Run=%lus, Cd=%lus, Idle=%lus, Burst=%lus",
+               (unsigned long)gConfig.tank_capacity_liters, gConfig.refill_trigger_level, gConfig.refill_cutoff_level,
+               (unsigned long)(gConfig.pump_min_runtime_ms / 1000), (unsigned long)(gConfig.pump_min_cooldown_ms / 1000),
+               (unsigned long)(gConfig.telemetry_idle_ms / 1000), (unsigned long)(gConfig.telemetry_burst_ms / 1000));
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Hydraulics & Timings Saved to NVS!\",\"is_err\":false}");
     } else if (msg.indexOf("\"cmd\":\"set_wifi\"") >= 0) {
       int sIdx = msg.indexOf("\"ssid\":\"");
       int pIdx = msg.indexOf("\"pass\":\"");
@@ -956,14 +1375,23 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size
         }
       }
       saveConfig(true);
-      sendConfigWs(num);
-      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Wi-Fi & Startup Config Saved! Reboot to apply STA changes.\",\"is_err\":false}");
+      sendConfigWs(num, true);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Wi-Fi Config Saved! Reinitializing Wi-Fi...\",\"is_err\":false}");
+      gDebugServerRestartRequested = true;
     } else if (msg.indexOf("\"cmd\":\"defaults\"") >= 0) {
       resetConfigToDefaults();
       saveConfig(true);
       applyLoRaConfig();
-      sendConfigWs(num);
-      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Defaults Restored!\",\"is_err\":false}");
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        gState.pumpEnabledAuto[0] = gConfig.pump_enabled_auto[0];
+        gState.pumpEnabledAuto[1] = gConfig.pump_enabled_auto[1];
+        gState.pumpEnabledAuto[2] = gConfig.pump_enabled_auto[2];
+        gState.triggerImmediateTelem = true;
+        xSemaphoreGive(xStateMutex);
+      }
+      if (xControlTask) xTaskNotifyGive(xControlTask);
+      sendConfigWs(num, true);
+      wsServer.sendTXT(num, "{\"type\":\"toast\",\"msg\":\"Factory Defaults Restored & Applied!\",\"is_err\":false}");
     } else if (msg.indexOf("\"cmd\":\"reboot\"") >= 0) {
       saveStats();
       saveConfig(true);
@@ -1003,30 +1431,60 @@ static void startDebugWeb() {
   if (gDebugServerRunning) return;
   LittleFS.begin(true);
 
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.setSleep(false);
+
+  int32_t apChannel = 6; // Default to channel 6 (matches Link2 router channel)
+  bool staConnected = false;
+
   if (strlen(gConfig.wifi_sta_ssid) > 0) {
-    WiFi.mode(WIFI_AP_STA);
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
     WiFi.begin(gConfig.wifi_sta_ssid, gConfig.wifi_sta_pass);
     logEvent("WIFI", 0, "Connecting to Home Wi-Fi SSID '%s'...", gConfig.wifi_sta_ssid);
+
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - t0 < 6000UL)) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      staConnected = true;
+      apChannel = WiFi.channel();
+      if (apChannel < 1 || apChannel > 13) apChannel = 6;
+      WiFi.mode(WIFI_AP_STA);
+      logEvent("WIFI", 3, "Connected to '%s' (Ch %ld)! STA IP: %s (RSSI %d dBm)",
+               gConfig.wifi_sta_ssid, (long)apChannel,
+               WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    } else {
+      // Stop STA background channel-hopping so SoftAP (192.168.4.1) has 0% packet loss!
+      WiFi.disconnect(true, false);
+      WiFi.mode(WIFI_AP);
+      logEvent("WIFI", 1, "Could not reach SSID '%s' — running pure SoftAP mode (0%% channel hop)",
+               gConfig.wifi_sta_ssid);
+    }
   } else {
     WiFi.mode(WIFI_AP);
   }
 
-  WiFi.softAP(DEBUG_WIFI_SSID, DEBUG_WIFI_PASS);
+  WiFi.softAP(DEBUG_WIFI_SSID, DEBUG_WIFI_PASS, apChannel, 0, 4);
+  // Must call setSleep(false) AFTER softAP() because ESP-IDF re-enables modem sleep on mode change
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
   dnsServer.start(53, "*", WiFi.softAPIP());
 
   if (MDNS.begin(MDNS_HOSTNAME)) {
     MDNS.addService("http", "tcp", 80);
+    MDNS.addService("ws", "tcp", 81);
     logEvent("WIFI", 3, "mDNS active: http://%s.local", MDNS_HOSTNAME);
   }
 
+  // Serve the complete self-contained HTML+CSS+JS bundle from PROGMEM in a single fast HTTP response
   httpServer.on("/", HTTP_GET, []() {
-    if (LittleFS.exists("/index.html")) {
-      File f = LittleFS.open("/index.html", "r");
-      httpServer.streamFile(f, "text/html");
-      f.close();
-    } else {
-      httpServer.send_P(200, "text/html", PAGE_INDEX_FALLBACK);
-    }
+    httpServer.sendHeader("Cache-Control", "no-cache");
+    httpServer.send_P(200, "text/html", PAGE_INDEX_FALLBACK);
   });
 
   httpServer.on("/style.css", HTTP_GET, []() {
@@ -1050,19 +1508,23 @@ static void startDebugWeb() {
   });
 
   httpServer.on("/api/status", HTTP_GET, []() {
-    char buf[384];
+    char buf[512];
     uint8_t wl = 0, ec = 0;
-    bool am = false, pond = false, demand = false;
+    bool am = false, pond = false, demand = false, burst = false;
     bool ps[3] = {};
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       wl = gState.waterLevel; am = gState.autoMode; pond = gState.pond;
-      demand = gState.demandActive; ec = gState.errorCode;
+      demand = gState.demandActive; ec = gState.errorCode; burst = gState.burstMode;
       for (int i=0; i<3; i++) ps[i] = gState.pumpState[i];
       xSemaphoreGive(xStateMutex);
     }
     snprintf(buf, sizeof(buf),
-      "{\"wl\":%u,\"mode\":\"%s\",\"pumps\":[%d,%d,%d],\"pond\":%d,\"demand\":%d,\"err\":%u,\"uptime\":%lu}",
-      wl, am?"AUTO":"MAN", ps[0], ps[1], ps[2], pond, demand, ec, (unsigned long)(millis()/1000));
+      "{\"wl\":%u,\"mode\":\"%s\",\"pumps\":[%d,%d,%d],\"pond\":%d,\"demand\":%d,"
+      "\"burst\":%d,\"sf\":%u,\"bw\":%u,\"ldro\":%d,\"toa_ms\":%lu,\"err\":%u,\"uptime\":%lu}",
+      wl, am?"AUTO":"MAN", ps[0], ps[1], ps[2], pond, demand,
+      burst?1:0, gConfig.lora_sf, gConfig.lora_bw_khz, isLdroActive()?1:0,
+      (unsigned long)calculatePacketToaMs(sizeof(LoRaHeader)+sizeof(StatusPayload)),
+      ec, (unsigned long)(millis()/1000));
     httpServer.send(200, "application/json", buf);
   });
 
@@ -1133,9 +1595,14 @@ static void startDebugWeb() {
   setupOTA();
 
   gDebugServerRunning = true;
-  Serial.printf("\n[DebugWeb] Hotspot online! SSID='%s' Pass='%s' IP=%s\n",
-                DEBUG_WIFI_SSID, DEBUG_WIFI_PASS, WiFi.softAPIP().toString().c_str());
-  Serial.println("[DebugWeb] Access via http://192.168.4.1 or http://tanknode.local");
+  Serial.printf("\n[DebugWeb] Hotspot online! SSID='%s' Pass='%s' Ch=%ld IP=%s\n",
+                DEBUG_WIFI_SSID, DEBUG_WIFI_PASS, (long)apChannel, WiFi.softAPIP().toString().c_str());
+  if (staConnected) {
+    Serial.printf("[DebugWeb] Home LAN STA IP: http://%s or http://%s.local\n",
+                  WiFi.localIP().toString().c_str(), MDNS_HOSTNAME);
+  } else {
+    Serial.println("[DebugWeb] Access via http://192.168.4.1 or http://tanknode.local");
+  }
 }
 
 static void stopDebugWeb() {
@@ -1153,6 +1620,11 @@ static void stopDebugWeb() {
 
 static void Task_DebugWebServer(void *) {
   for (;;) {
+    if (gDebugServerRestartRequested) {
+      gDebugServerRestartRequested = false;
+      if (gDebugServerRunning) stopDebugWeb();
+      if (gDebugServerWanted) startDebugWeb();
+    }
     if (gDebugServerWanted != gDebugServerRunning) {
       if (gDebugServerWanted) startDebugWeb();
       else stopDebugWeb();
@@ -1166,12 +1638,13 @@ static void Task_DebugWebServer(void *) {
 
       uint32_t now = millis();
       static uint32_t lastWsBc = 0;
-      if (now - lastWsBc >= WS_BROADCAST_INTERVAL_MS) {
+      if (gWsImmediateBroadcast || (now - lastWsBc >= WS_BROADCAST_INTERVAL_MS)) {
+        gWsImmediateBroadcast = false;
         lastWsBc = now;
         broadcastTelemetryWs();
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
 #endif
@@ -1180,6 +1653,7 @@ static void Task_DebugWebServer(void *) {
 static void Task_InputSensorPoll(void *) {
   TickType_t wake = xTaskGetTickCount();
   uint8_t prevBtns = 0xFF;
+  uint8_t prevFloats = 0x07;
   uint32_t retryAt = 0;
   uint8_t candidateLvl = 0xFF;
   uint32_t candidateSince = 0;
@@ -1218,8 +1692,10 @@ static void Task_InputSensorPoll(void *) {
         gState.pcfOk = false;
         gState.waterLevelValid = false;
         gState.errorCode = ERR_PCF_I2C;
+        gState.triggerImmediateTelem = true;
         xSemaphoreGive(xStateMutex);
       }
+      if (xControlTask) xTaskNotifyGive(xControlTask);
       retryAt = millis() + PCF_RETRY_MS;
       continue;
     }
@@ -1228,6 +1704,9 @@ static void Task_InputSensorPoll(void *) {
     // ── FLOAT SENSOR PLAUSIBILITY CHECK ──
     // Float switches are bits 0, 1, 2. (Active-LOW: 0 = submerged/closed, 1 = dry/open)
     uint8_t floatBits = curr & 0x07;
+    bool rawFloatToggled = (floatBits != prevFloats);
+    prevFloats = floatBits;
+
     uint8_t rawLvl = 0;
     bool plausibilityOk = false;
 
@@ -1275,31 +1754,43 @@ static void Task_InputSensorPoll(void *) {
     }
     prevBtns = curr;
 
+    bool notifyCtrl = false;
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
       gState.pcfRaw = curr;
       gState.rawWaterLevel = rawLvl;
       if (!plausibilityOk) {
+        if (gState.errorCode != ERR_FLOAT_PLAUSIBILITY) {
+          gState.triggerImmediateTelem = true;
+          notifyCtrl = true;
+        }
         gState.waterLevelValid = false;
         gState.errorCode = ERR_FLOAT_PLAUSIBILITY;
       } else {
         if (gState.errorCode == ERR_FLOAT_PLAUSIBILITY || gState.errorCode == ERR_PCF_I2C) {
           gState.errorCode = ERR_NONE;
+          gState.triggerImmediateTelem = true;
+          notifyCtrl = true;
         }
         if (lastStableLvl != 0xFF) {
           gState.waterLevel = lastStableLvl;
           gState.waterLevelValid = true;
-          if (levelChanged) {
+          if (levelChanged || rawFloatToggled) {
             gState.triggerImmediateTelem = true;
+            notifyCtrl = true;
           }
         }
       }
 
-      if (edges & (1 << PCF_BTN_BIT_MODE))   gState.btnMode_edge = true;
-      if (edges & (1 << PCF_BTN_BIT_P1))     gState.btnP1_edge = true;
-      if (edges & (1 << PCF_BTN_BIT_P2))     gState.btnP2_edge = true;
-      if (edges & (1 << PCF_BTN_BIT_P3))     gState.btnP3_edge = true;
-      if (edges & (1 << PCF_BTN_POND_P4))    gState.btnPond_edge = true;
+      if (edges & (1 << PCF_BTN_BIT_MODE)) { gState.btnMode_edge = true; notifyCtrl = true; }
+      if (edges & (1 << PCF_BTN_BIT_P1))   { gState.btnP1_edge = true;   notifyCtrl = true; }
+      if (edges & (1 << PCF_BTN_BIT_P2))   { gState.btnP2_edge = true;   notifyCtrl = true; }
+      if (edges & (1 << PCF_BTN_BIT_P3))   { gState.btnP3_edge = true;   notifyCtrl = true; }
+      if (edges & (1 << PCF_BTN_POND_P4))  { gState.btnPond_edge = true; notifyCtrl = true; }
       xSemaphoreGive(xStateMutex);
+    }
+
+    if (notifyCtrl && xControlTask) {
+      xTaskNotifyGive(xControlTask);
     }
   }
 }
@@ -1311,7 +1802,7 @@ static void Task_ControlEngine(void *) {
   uint32_t *pRtStats[3] = {&gStats.runtime_p1_s, &gStats.runtime_p2_s, &gStats.runtime_p3_s};
   uint32_t pOnSince[3] = {};
   uint32_t lastTelem = 0;
-  uint32_t lastPondBroadcast = 0; 
+  uint32_t lastTransitionMs = 0;
   uint32_t lastStatusPrint = 0;
   uint32_t lastGwMs = 0;
   bool gwSeen = false;
@@ -1421,9 +1912,9 @@ static void Task_ControlEngine(void *) {
       }
 
       uint32_t gwAgo = gwSeen ? (now - lastGwMs) / 1000 : 0;
-      Serial.printf("\r[Status] Up:%lus WL:%u Mode:%s Charge Latch:%d Pond:%d | %s| GW:%lus Err:%u            ", 
+      Serial.printf("\r[Status] Up:%lus WL:%u Mode:%s Charge:%d Pond:%d | %s| Rate:%s GW:%lus Err:%u       ", 
                     now / 1000, waterLevel, autoMode ? "AUTO" : "MAN", systemDemandOn, gConfig.pond_enabled,
-                    pumpStr, gwAgo, errorCode);
+                    pumpStr, gState.burstMode ? "BURST" : "IDLE", gwAgo, errorCode);
     }
 
     if (radioOk && gwSeen) {
@@ -1435,7 +1926,34 @@ static void Task_ControlEngine(void *) {
       }
     }
 
-    if (btnMode) {
+    uint8_t explicitMode = 0;
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      explicitMode = gState.setModeExplicit;
+      gState.setModeExplicit = 0;
+      xSemaphoreGive(xStateMutex);
+    }
+
+    if (explicitMode == 1) {
+      autoMode = true;
+      gConfig.boot_auto_mode = 1;
+      saveConfig();
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        gState.autoMode = true;
+        gState.triggerImmediateTelem = true;
+        xSemaphoreGive(xStateMutex);
+      }
+      Serial.println("\n[Ctrl] Mode -> AUTO (explicit)");
+    } else if (explicitMode == 2) {
+      autoMode = false;
+      gConfig.boot_auto_mode = 0;
+      saveConfig();
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        gState.autoMode = false;
+        gState.triggerImmediateTelem = true;
+        xSemaphoreGive(xStateMutex);
+      }
+      Serial.println("\n[Ctrl] Mode -> MANUAL (explicit)");
+    } else if (btnMode) {
       autoMode = !autoMode;
       gConfig.boot_auto_mode = autoMode ? 1 : 0;
       saveConfig();
@@ -1478,13 +1996,16 @@ static void Task_ControlEngine(void *) {
             gState.pond = pondRunning;
             changed = true;
           }
-          if (changed) {
-            gState.triggerImmediateTelem = true; // Instantly broadcast back to reach mutual accord!
+          // Only trigger a follow-up telemetry frame if Pond is STILL out of sync with Tank's demand!
+          // If pondRunning == gConfig.pond_enabled, mutual accord is reached -> do NOT echo a redundant LoRa packet!
+          if (changed && (pondRunning != gConfig.pond_enabled)) {
+            gState.triggerImmediateTelem = true;
           }
           xSemaphoreGive(xStateMutex);
         }
-        Serial.printf("\n[Ctrl] Pond Node 0x03 Status over LoRa -> Pump %s (Accord telem: %s)\n", 
-                      pondRunning ? "RUNNING" : "STOPPED", changed ? "YES" : "NO");
+        gWsImmediateBroadcast = true;
+        Serial.printf("\n[Ctrl] Pond Node 0x03 Status over LoRa -> Pump %s (Accord synced: %s)\n", 
+                      pondRunning ? "RUNNING" : "STOPPED", (pondRunning == gConfig.pond_enabled) ? "YES" : "NO");
       }
 
       if (rx.header.msg_type == MSG_CMD) {
@@ -1513,23 +2034,24 @@ static void Task_ControlEngine(void *) {
             gState.triggerImmediateTelem = true;
             xSemaphoreGive(xStateMutex);
           }
+          gWsImmediateBroadcast = true;
           Serial.printf("[Ctrl] Mode -> %s\n", autoMode ? "AUTO" : "MANUAL");
         }
         
         if (target & CMD_TARGET_POND) {
           bool newPond = setVal ? (bool)value : !gConfig.pond_enabled;
-          if (gConfig.pond_enabled != newPond) {
-            gConfig.pond_enabled = newPond;
-            systemDemandOn = newPond;
-            pondManualOverride = newPond;
-            saveConfig();
-            Serial.printf("[Ctrl] Remote Pond Switch Command -> %s (Override=%d)\n", gConfig.pond_enabled ? "ON" : "OFF", pondManualOverride);
-            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-              gState.demandActive = newPond;
-              gState.triggerImmediateTelem = true;
-              xSemaphoreGive(xStateMutex);
-            }
+          gConfig.pond_enabled = newPond;
+          systemDemandOn = newPond;
+          pondManualOverride = newPond;
+          saveConfig();
+          Serial.printf("[Ctrl] Remote Pond Switch Command -> %s (Override=%d)\n", gConfig.pond_enabled ? "ON" : "OFF", pondManualOverride);
+          if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            gState.demandActive = newPond;
+            gState.pond = newPond; // Command came from GW/Pond, so Pond state is already aligned
+            gState.triggerImmediateTelem = true;
+            xSemaphoreGive(xStateMutex);
           }
+          gWsImmediateBroadcast = true;
         }
 
         for (int i = 0; i < 3; i++) {
@@ -1538,16 +2060,16 @@ static void Task_ControlEngine(void *) {
             bool want = setVal ? (bool)value : !ph[i]->state;
             if (autoMode) {
               if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-                gState.pumpEnabledAuto[i] = want;
-                gConfig.pump_enabled_auto[i] = want; 
+                gState.pumpOverride[i] = want ? PUMP_OVERRIDE_FORCE_ON : PUMP_OVERRIDE_FORCE_OFF;
+                gState.pumpTimedUntil[i] = 0;
                 gState.triggerImmediateTelem = true;
                 xSemaphoreGive(xStateMutex);
-                saveConfig(); 
-                Serial.printf("[Ctrl] Auto P%d selection via LoRa -> %s (Saved)\n", i + 1, gConfig.pump_enabled_auto[i] ? "SELECTED" : "DESELECTED");
+                Serial.printf("[Ctrl] LoRa P%d in AUTO -> Override %s\n", i + 1, want ? "FORCE_ON" : "FORCE_OFF");
               }
+              gWsImmediateBroadcast = true;
             } else {
               uint32_t nowMs = millis();
-              if (want && !canChangePumpState(*ph[i], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+              if (want && !ph[i]->state && !canChangePumpState(*ph[i], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
                 uint32_t el = (ph[i]->lastOffTime > 0) ? (nowMs - ph[i]->lastOffTime) : 0;
                 uint32_t cdRem = (el < gConfig.pump_min_cooldown_ms) ? (gConfig.pump_min_cooldown_ms - el) / 1000 : 0;
                 Serial.printf("[Ctrl] Manual P%d via LoRa rejected: cooldown active (%lus left)\n", i + 1, cdRem);
@@ -1555,7 +2077,7 @@ static void Task_ControlEngine(void *) {
                   gState.triggerImmediateTelem = true;
                   xSemaphoreGive(xStateMutex);
                 }
-              } else if (!want && !canChangePumpState(*ph[i], false, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+              } else if (!want && ph[i]->state && !canChangePumpState(*ph[i], false, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
                 uint32_t el = (ph[i]->lastOnTime > 0) ? (nowMs - ph[i]->lastOnTime) : 0;
                 uint32_t runRem = (el < gConfig.pump_min_runtime_ms) ? (gConfig.pump_min_runtime_ms - el) / 1000 : 0;
                 Serial.printf("[Ctrl] Manual P%d via LoRa rejected: min runtime active (%lus left)\n", i + 1, runRem);
@@ -1574,10 +2096,13 @@ static void Task_ControlEngine(void *) {
                 saveConfig();
                 Serial.printf("[Ctrl] Manual P%d via LoRa -> %s (saved)\n", i + 1, want ? "ON" : "OFF");
                 if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                  gState.pumpOverride[i] = PUMP_OVERRIDE_AUTO;
+                  gState.pumpTimedUntil[i] = 0;
                   gState.triggerImmediateTelem = true;
                   xSemaphoreGive(xStateMutex);
                 }
               }
+              gWsImmediateBroadcast = true;
             }
           }
         }
@@ -1597,10 +2122,13 @@ static void Task_ControlEngine(void *) {
           saveConfig(); 
           Serial.printf("\n[Ctrl] Auto P%d selection via Button -> %s (Saved)\n", i + 1, gConfig.pump_enabled_auto[i] ? "SELECTED" : "DESELECTED");
         }
+        gWsImmediateBroadcast = true;
       } else {
         bool want = !ph[i]->state;
         if (want && !canChangePumpState(*ph[i], true, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
           Serial.printf("\n[Ctrl] P%d toggle rejected: cooldown active\n", i + 1);
+        } else if (!want && !canChangePumpState(*ph[i], false, false, gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms)) {
+          Serial.printf("\n[Ctrl] P%d toggle rejected: min runtime active\n", i + 1);
         } else {
           if (!want && ph[i]->state) {
             *pRtStats[i] += (millis() - pOnSince[i]) / 1000;
@@ -1612,10 +2140,13 @@ static void Task_ControlEngine(void *) {
           saveConfig();
           Serial.printf("\n[Ctrl] P%d -> %s (saved)\n", i + 1, want ? "ON" : "OFF");
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            gState.pumpOverride[i] = PUMP_OVERRIDE_AUTO;
+            gState.pumpTimedUntil[i] = 0;
             gState.triggerImmediateTelem = true;
             xSemaphoreGive(xStateMutex);
           }
         }
+        gWsImmediateBroadcast = true;
       }
     }
 
@@ -1636,23 +2167,23 @@ static void Task_ControlEngine(void *) {
         }
       }
 
-      // Calculate active operational rule for SCADA matrix
-      uint8_t currentRule = 3;
+      // Calculate active operational rule for SCADA matrix (1=Full L3, 2=Mid L2, 3=Low L1, 4=Dry L0)
+      uint8_t currentRule = 2;
       if (waterLevelValid && waterLevel == 0) {
-        currentRule = 2; // Rule 2: Emergency Dry Trip (Cavitation Safeguard)
-      } else if (autoMode && waterLevelValid && waterLevel <= gConfig.refill_trigger_level) {
-        currentRule = 1; // Rule 1: Tank Low (Auto-Refill Demand ON)
+        currentRule = 4; // Rule 4: Emergency Dry Trip (Cavitation Safeguard)
+      } else if (waterLevelValid && waterLevel <= gConfig.refill_trigger_level) {
+        currentRule = 3; // Rule 3: Low Water (Auto-Refill Demand ON)
       } else if (waterLevelValid && waterLevel >= gConfig.refill_cutoff_level) {
-        currentRule = 4; // Rule 4: Tank Full (Refill Satisfied / Cutoff)
+        currentRule = 1; // Rule 1: Full Reservoir (Refill Satisfied / Cutoff)
       } else {
-        currentRule = 3; // Rule 3: Nominal Water Available (Parallel Outflow Active)
+        currentRule = 2; // Rule 2: Nominal Storage (Balanced Flow)
       }
       gState.activeRule = currentRule;
 
       xSemaphoreGive(xStateMutex);
     }
 
-    // ── PARALLEL IRRIGATION CONTROL ENGINE WITH INDEPENDENT OVERRIDES & ANTI-INRUSH STAGGER ──
+    // ── PARALLEL IRRIGATION CONTROL ENGINE WITH INDEPENDENT OVERRIDES & CONFIGURABLE STAGGER ──
     bool allowed[3] = {true, true, true};
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
       allowed[0] = gState.pumpEnabledAuto[0];
@@ -1683,8 +2214,8 @@ static void Task_ControlEngine(void *) {
       }
 
       if (targetState != ph[i]->state) {
-        // Anti-inrush stagger check: delay simultaneous motor starts by MOTOR_STAGGER_MS
-        if (targetState && (now - lastMotorStartMs < MOTOR_STAGGER_MS)) {
+        // Configurable anti-inrush stagger check: delay simultaneous motor starts by gConfig.motor_stagger_ms
+        if (targetState && (now - lastMotorStartMs < gConfig.motor_stagger_ms)) {
           continue; // Wait for stagger interval before starting next motor
         }
 
@@ -1704,10 +2235,14 @@ static void Task_ControlEngine(void *) {
             gState.triggerImmediateTelem = true;
             xSemaphoreGive(xStateMutex);
           }
+          gWsImmediateBroadcast = true;
         }
       }
     }
 
+    // ── EVENT-DRIVEN ZERO-SPAM DUAL-RATE TELEMETRY ENGINE ──────────────────────
+    bool triggerTelem = false;
+    bool pondActive = false;
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
       for (int i = 0; i < 3; i++) {
         gState.pumpState[i] = ph[i]->state;
@@ -1720,6 +2255,42 @@ static void Task_ControlEngine(void *) {
       if (gState.psramOk) {
         gState.psramFreeBytes = ESP.getFreePsram();
       }
+      triggerTelem = gState.triggerImmediateTelem;
+      gState.triggerImmediateTelem = false;
+      pondActive = gState.pond;
+      xSemaphoreGive(xStateMutex);
+    }
+
+    static bool followupPending = false;
+    if (triggerTelem) {
+      lastTransitionMs = now;
+      followupPending = true;
+      gWsImmediateBroadcast = true;
+    }
+
+    bool pondAccordSynced = (pondActive == gConfig.pond_enabled);
+    bool recentTransition = (lastTransitionMs > 0) && ((now - lastTransitionMs) < BURST_SETTLE_HOLD_MS);
+    bool anyPumpRunning = (ph[0]->state || ph[1]->state || ph[2]->state || gConfig.pond_enabled);
+    bool isBurstMode = recentTransition || (!pondAccordSynced);
+
+    static bool wasBurstMode = false;
+    if (wasBurstMode && !isBurstMode) {
+      // Transition from burst to idle: transmit 1 status packet with burst_mode=0 to inform gateway that node is now IDLE!
+      if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        gState.triggerImmediateTelem = true;
+        xSemaphoreGive(xStateMutex);
+      }
+    }
+    wasBurstMode = isBurstMode;
+
+    uint32_t minSafeBurstMs = getDynamicGuardMs() + 200UL;
+    uint32_t effectiveBurstMs = max(gConfig.telemetry_burst_ms, minSafeBurstMs);
+    uint32_t activePumpingInterval = max(gConfig.telemetry_burst_ms, 15000UL); // 15-20s while pumping to maintain telemetry & odometers without spam
+    uint32_t effectiveTelemIntervalMs = isBurstMode ? effectiveBurstMs : (anyPumpRunning ? activePumpingInterval : gConfig.telemetry_idle_ms);
+
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      gState.burstMode = isBurstMode;
+      gState.activeTelemIntervalMs = effectiveTelemIntervalMs;
       xSemaphoreGive(xStateMutex);
     }
 
@@ -1756,50 +2327,44 @@ static void Task_ControlEngine(void *) {
       Serial.println("\n[NVS] Periodic pump stats saved to flash");
     }
 
-    // ── EVENT-DRIVEN & PERIODIC TELEMETRY DISPATCH ──────────────────────────
-    bool triggerTelem = false;
-    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-      triggerTelem = gState.triggerImmediateTelem;
-      gState.triggerImmediateTelem = false;
-      xSemaphoreGive(xStateMutex);
-    }
-
-    if (radioOk && (triggerTelem || ((now - lastTelem) >= gConfig.telemetry_interval_ms))) {
+    // ── DISPATCH TELEMETRY PACKET (STRICTLY EVENT-DRIVEN + QUIET IDLE HEARTBEAT) ──
+    bool sendFollowup = followupPending && ((now - lastTelem) >= effectiveBurstMs);
+    bool sendPeriodic = ((now - lastTelem) >= effectiveTelemIntervalMs);
+    if (radioOk && (triggerTelem || sendFollowup || sendPeriodic)) {
       lastTelem = now;
+      if (sendFollowup && !triggerTelem) {
+        followupPending = false;
+      }
       LoRaPacket tx = {};
       buildStatus(tx);
       xQueueSend(xTxQueue, &tx, 0);
+      if (xLoRaTask) xTaskNotifyGive(xLoRaTask);
     }
 
-    // ── DISPATCH BROADCAST FOR THE REMOTE POND CHARGER ──────────────────────
+    // ── TARGETED RETRY FOR REMOTE POND ACCORD (ONLY IF OUT OF SYNC) ─────────
     static uint32_t lastPondBroadcast = 0;
     static uint8_t pondRetryCount = 0;
     static bool lastDispatchedPond = false;
-    bool pondChanged = (gConfig.pond_enabled != lastDispatchedPond);
-    bool pondAccordSynced = false;
-    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-      pondAccordSynced = (gState.pond == gConfig.pond_enabled);
-      xSemaphoreGive(xStateMutex);
+    if (gConfig.pond_enabled != lastDispatchedPond) {
+      lastDispatchedPond = gConfig.pond_enabled;
+      lastPondBroadcast = now; // Initial demand is already carried inside the immediate MSG_STATUS above!
+      pondRetryCount = 0;
+    } else if (pondAccordSynced) {
+      pondRetryCount = 0;
     }
-    uint32_t accordRetryInterval = (gConfig.lora_sf >= 12) ? 6000UL :
-                                   (gConfig.lora_sf == 11) ? 4500UL : 3000UL;
-    bool needRetry = (!pondAccordSynced) && (pondRetryCount < 5) && ((now - lastPondBroadcast) >= accordRetryInterval);
-    bool periodicBroadcast = (now - lastPondBroadcast >= gConfig.telemetry_interval_ms);
 
-    if (radioOk && (pondChanged || needRetry || periodicBroadcast)) {
+    uint32_t accordRetryInterval = max(3500UL, getDynamicGuardMs() * 2UL);
+    bool needRetry = (!pondAccordSynced) && (pondRetryCount < 3) && ((now - lastPondBroadcast) >= accordRetryInterval);
+
+    if (radioOk && needRetry) {
       lastPondBroadcast = now;
-      if (pondChanged) {
-        lastDispatchedPond = gConfig.pond_enabled;
-        pondRetryCount = 0;
-      } else if (needRetry) {
-        pondRetryCount++;
-        Serial.printf("\n[Ctrl] Awaiting Pond Accord ACK (Retry #%u/5)...\n", pondRetryCount);
-      }
+      pondRetryCount++;
+      Serial.printf("\n[Ctrl] Awaiting Pond Accord ACK (Retry #%u/3)...\n", pondRetryCount);
       LoRaPacket txPkt = {};
       txPkt.header = {gConfig.network_magic, gConfig.pond_id, gConfig.node_id, MSG_CMD};
       txPkt.payload.cmd = {CMD_TARGET_POND, CMD_ACTION_SET, gConfig.pond_enabled ? (uint8_t)1 : (uint8_t)0}; 
       xQueueSend(xTxQueue, &txPkt, 0);
-      Serial.printf("\n[Ctrl] Dispatched remote Pond charge state broadcast via LoRa -> %d\n", gConfig.pond_enabled);
+      if (xLoRaTask) xTaskNotifyGive(xLoRaTask);
     }
   }
 }
@@ -1886,8 +2451,8 @@ static void Task_UIAnimation(void *) {
     leds[5] = pond ? CRGB::Green : CRGB::Red;
     leds[6] = am ? CRGB::Green : CRGB::Blue;
 
-    // ── FIXED: PREDICTIVE PARALLEL WATER CAPICITY LED FADING SCHEME ──────────
-    // Reverted UI layout indexing: P1=LED9, P2=LED8, P3=LED7
+    // ── PREDICTIVE PARALLEL WATER CAPACITY LED FADING SCHEME ─────────────────
+    // UI layout indexing: P1=LED9, P2=LED8, P3=LED7
     for (int i = 0; i < 3; i++) {
       int ledIdx = 9 - i; 
 
@@ -1938,7 +2503,7 @@ static void Task_SerialConsole(void *) {
         if (cmd == "help") {
           Serial.println("Commands:");
           Serial.println("  status                  - Display real-time telemetry and state");
-          Serial.println("  radio                   - Display RSSI, SNR, LoRa status");
+          Serial.println("  radio                   - Display RSSI, SNR, SF, LDRO, ToA, CAD stats");
           Serial.println("  config                  - Display active configuration");
           Serial.println("  stats                   - Display pump runtime stats and boot count");
           Serial.println("  tx                      - Enqueue manual LoRa status packet");
@@ -1948,9 +2513,14 @@ static void Task_SerialConsole(void *) {
           Serial.println("  web always [on|off]     - Set Web dashboard to always auto-start on boot");
           Serial.println("  set wifi <ssid> <pass>  - Configure Home Wi-Fi credentials (STA)");
           Serial.println("  set wifi clear          - Clear Home Wi-Fi credentials");
+          Serial.println("  set sf <6-12>           - Set LoRa Spreading Factor dynamically");
+          Serial.println("  set power <-9..22>      - Set LoRa TX Power (dBm)");
+          Serial.println("  set ldro <0|1|2>        - Set LDRO mode (0=Auto, 1=Force ON, 2=Force OFF)");
           Serial.println("  set runtime <ms>        - Set pump min runtime (1000 - 300000 ms)");
-          Serial.println("  set cooldown <ms>       - Set pump min cooldown (5000 - 600000 ms)");
-          Serial.println("  set telem <ms>          - Set telemetry broadcast interval (2000 - 300000 ms)");
+          Serial.println("  set cooldown <ms>       - Set pump min cooldown (1000 - 600000 ms)");
+          Serial.println("  set stagger <ms>        - Set motor anti-inrush stagger (0 - 60000 ms)");
+          Serial.println("  set idle <ms>           - Set silent idle telemetry interval (5000 - 3600000 ms)");
+          Serial.println("  set burst <ms>          - Set active burst telemetry interval (1000 - 60000 ms)");
           Serial.println("  set mask <p1> <p2> <p3> - Enable/disable auto pumps (e.g. set mask 1 1 0)");
           Serial.println("  set pond <0|1>          - Enable/disable pond pump");
           Serial.println("  set mode <auto|manual>  - Set operating mode and default boot mode");
@@ -1959,24 +2529,34 @@ static void Task_SerialConsole(void *) {
           Serial.println("  reboot                  - Save state and restart ESP32-S3");
         } else if (cmd == "status") {
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            Serial.printf("wl=%u auto=%d P1=%d P2=%d P3=%d (Allowed:%d;%d;%d) pond=%d err=%u rssi=%d snr=%d radio=%d pcf=%d\n",
+            Serial.printf("wl=%u auto=%d P1=%d P2=%d P3=%d (Allowed:%d;%d;%d) pond=%d burst=%d err=%u rssi=%d snr=%d radio=%d pcf=%d\n",
                           gState.waterLevel, gState.autoMode, gState.pumpState[0],
                           gState.pumpState[1], gState.pumpState[2],
                           gState.pumpEnabledAuto[0], gState.pumpEnabledAuto[1], gState.pumpEnabledAuto[2],
-                          gState.pond, gState.errorCode, gState.lastRssi, gState.lastSnr, gState.radioOk, gState.pcfOk);
+                          gState.pond, gState.burstMode, gState.errorCode, gState.lastRssi, gState.lastSnr, gState.radioOk, gState.pcfOk);
             xSemaphoreGive(xStateMutex);
           }
         } else if (cmd == "radio") {
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            Serial.printf("rssi=%d snr=%d ok=%d\n", gState.lastRssi, gState.lastSnr, gState.radioOk);
+            Serial.printf("freq=%luHz pwr=%ddBm SF%u BW%ukHz CR4/%u LDRO=%s(mode=%u) Tsym=%.2fms ToA=%lums Guard=%lums CAD_defers=%lu rssi=%d snr=%d ok=%d\n",
+                          (unsigned long)gConfig.lora_freq_hz, gConfig.lora_tx_power_dbm,
+                          gConfig.lora_sf, gConfig.lora_bw_khz, gConfig.lora_cr,
+                          isLdroActive() ? "ON" : "OFF", gConfig.lora_ldro,
+                          getSymbolDurationMs(),
+                          (unsigned long)calculatePacketToaMs(sizeof(LoRaHeader) + sizeof(StatusPayload)),
+                          (unsigned long)getDynamicGuardMs(),
+                          (unsigned long)gState.cadBusyCount,
+                          gState.lastRssi, gState.lastSnr, gState.radioOk);
             xSemaphoreGive(xStateMutex);
           }
         } else if (cmd == "config") {
-          Serial.printf("runtime=%lums cooldown=%lums telem=%lums auto=%u mask=%d;%d;%d pond=%d debug=%u always_on=%u sta='%s'\n",
-                        gConfig.pump_min_runtime_ms, gConfig.pump_min_cooldown_ms,
-                        gConfig.telemetry_interval_ms, gConfig.boot_auto_mode,
+          Serial.printf("runtime=%lums cooldown=%lums stagger=%lums idle=%lums burst=%lums lbt=%u/%ums auto=%u mask=%d;%d;%d cap=%luL trig=L%u cut=L%u\n",
+                        (unsigned long)gConfig.pump_min_runtime_ms, (unsigned long)gConfig.pump_min_cooldown_ms,
+                        (unsigned long)gConfig.motor_stagger_ms, (unsigned long)gConfig.telemetry_idle_ms,
+                        (unsigned long)gConfig.telemetry_burst_ms, gConfig.lbt_retries, gConfig.lbt_backoff_ms,
+                        gConfig.boot_auto_mode,
                         gConfig.pump_enabled_auto[0], gConfig.pump_enabled_auto[1], gConfig.pump_enabled_auto[2],
-                        gConfig.pond_enabled, gConfig.debug_mode_enabled, gConfig.web_always_on, gConfig.wifi_sta_ssid);
+                        (unsigned long)gConfig.tank_capacity_liters, gConfig.refill_trigger_level, gConfig.refill_cutoff_level);
         } else if (cmd == "stats") {
           Serial.printf("P1=%lus P2=%lus P3=%lus boots=%lu\n", gStats.runtime_p1_s,
                         gStats.runtime_p2_s, gStats.runtime_p3_s, gStats.boot_count);
@@ -1996,6 +2576,7 @@ static void Task_SerialConsole(void *) {
         } else if (cmd == "auto") {
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             gState.autoMode = true;
+            gState.triggerImmediateTelem = true;
             xSemaphoreGive(xStateMutex);
           }
           gConfig.boot_auto_mode = 1;
@@ -2005,6 +2586,7 @@ static void Task_SerialConsole(void *) {
         } else if (cmd == "manual") {
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             gState.autoMode = false;
+            gState.triggerImmediateTelem = true;
             xSemaphoreGive(xStateMutex);
           }
           gConfig.boot_auto_mode = 0;
@@ -2061,18 +2643,55 @@ static void Task_SerialConsole(void *) {
           memset(gConfig.wifi_sta_ssid, 0, sizeof(gConfig.wifi_sta_ssid));
           memset(gConfig.wifi_sta_pass, 0, sizeof(gConfig.wifi_sta_pass));
           saveConfig(true);
-          Serial.println("Home Wi-Fi credentials cleared. SoftAP mode only.");
+#if ENABLE_DEBUG_WEB
+          gDebugServerRestartRequested = true;
+#endif
+          Serial.println("Home Wi-Fi credentials cleared. Restarting SoftAP...");
         } else if (cmd.startsWith("set wifi ")) {
           char ssid[33] = {};
           char pass[65] = {};
           if (sscanf(cmd.c_str() + 9, "%32s %64s", ssid, pass) >= 1) {
+            memset(gConfig.wifi_sta_ssid, 0, sizeof(gConfig.wifi_sta_ssid));
+            memset(gConfig.wifi_sta_pass, 0, sizeof(gConfig.wifi_sta_pass));
             strncpy(gConfig.wifi_sta_ssid, ssid, sizeof(gConfig.wifi_sta_ssid) - 1);
             strncpy(gConfig.wifi_sta_pass, pass, sizeof(gConfig.wifi_sta_pass) - 1);
             saveConfig(true);
-            Serial.printf("Saved Home Wi-Fi credentials: SSID='%s'\n", ssid);
-            Serial.println("Reboot or restart debug web server to connect.");
+#if ENABLE_DEBUG_WEB
+            gDebugServerRestartRequested = true;
+#endif
+            Serial.printf("Saved Home Wi-Fi credentials: SSID='%s' — reconnecting Wi-Fi now...\n", ssid);
           } else {
             Serial.println("Usage: set wifi <ssid> <pass> (or: set wifi clear)");
+          }
+        } else if (cmd.startsWith("set sf ")) {
+          uint8_t sf = cmd.substring(7).toInt();
+          if (sf >= CFG_LORA_SF_MIN && sf <= CFG_LORA_SF_MAX) {
+            gConfig.lora_sf = sf;
+            saveConfig(true);
+            applyLoRaConfig();
+            Serial.printf("LoRa SF set to SF%u (LDRO=%s)\n", sf, isLdroActive() ? "ON" : "OFF");
+          } else {
+            Serial.println("Invalid SF (6-12)");
+          }
+        } else if (cmd.startsWith("set power ")) {
+          int pwr = cmd.substring(10).toInt();
+          if (pwr >= CFG_LORA_PWR_MIN_DBM && pwr <= CFG_LORA_PWR_MAX_DBM) {
+            gConfig.lora_tx_power_dbm = (int8_t)pwr;
+            saveConfig(true);
+            applyLoRaConfig();
+            Serial.printf("LoRa TX Power set to %d dBm\n", pwr);
+          } else {
+            Serial.println("Invalid TX Power (-9 to 22 dBm)");
+          }
+        } else if (cmd.startsWith("set ldro ")) {
+          uint8_t ld = cmd.substring(9).toInt();
+          if (ld <= 2) {
+            gConfig.lora_ldro = ld;
+            saveConfig(true);
+            applyLoRaConfig();
+            Serial.printf("LoRa LDRO mode set to %u (Active=%s)\n", ld, isLdroActive() ? "ON" : "OFF");
+          } else {
+            Serial.println("Invalid LDRO mode (0=Auto, 1=Force ON, 2=Force OFF)");
           }
         } else if (cmd.startsWith("set runtime ")) {
           uint32_t val = cmd.substring(12).toInt();
@@ -2092,14 +2711,32 @@ static void Task_SerialConsole(void *) {
           } else {
             Serial.printf("Invalid cooldown (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_COOLDOWN_MIN_MS, CFG_COOLDOWN_MAX_MS);
           }
-        } else if (cmd.startsWith("set telem ")) {
-          uint32_t val = cmd.substring(10).toInt();
-          if (val >= CFG_TELEM_MIN_MS && val <= CFG_TELEM_MAX_MS) {
-            gConfig.telemetry_interval_ms = val;
+        } else if (cmd.startsWith("set stagger ")) {
+          uint32_t val = cmd.substring(12).toInt();
+          if (val >= CFG_STAGGER_MIN_MS && val <= CFG_STAGGER_MAX_MS) {
+            gConfig.motor_stagger_ms = val;
             saveConfig(true);
-            Serial.printf("Config: telemetry_interval_ms set to %lu ms\n", (unsigned long)val);
+            Serial.printf("Config: motor_stagger_ms set to %lu ms\n", (unsigned long)val);
           } else {
-            Serial.printf("Invalid telemetry interval (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_TELEM_MIN_MS, CFG_TELEM_MAX_MS);
+            Serial.printf("Invalid stagger (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_STAGGER_MIN_MS, CFG_STAGGER_MAX_MS);
+          }
+        } else if (cmd.startsWith("set idle ") || cmd.startsWith("set telem ")) {
+          uint32_t val = cmd.substring(cmd.startsWith("set idle ") ? 9 : 10).toInt();
+          if (val >= CFG_TELEM_IDLE_MIN_MS && val <= CFG_TELEM_IDLE_MAX_MS) {
+            gConfig.telemetry_idle_ms = val;
+            saveConfig(true);
+            Serial.printf("Config: telemetry_idle_ms set to %lu ms\n", (unsigned long)val);
+          } else {
+            Serial.printf("Invalid idle interval (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_TELEM_IDLE_MIN_MS, CFG_TELEM_IDLE_MAX_MS);
+          }
+        } else if (cmd.startsWith("set burst ")) {
+          uint32_t val = cmd.substring(10).toInt();
+          if (val >= CFG_TELEM_BURST_MIN_MS && val <= CFG_TELEM_BURST_MAX_MS) {
+            gConfig.telemetry_burst_ms = val;
+            saveConfig(true);
+            Serial.printf("Config: telemetry_burst_ms set to %lu ms\n", (unsigned long)val);
+          } else {
+            Serial.printf("Invalid burst interval (%lu ms). Range: %lu - %lu ms\n", (unsigned long)val, CFG_TELEM_BURST_MIN_MS, CFG_TELEM_BURST_MAX_MS);
           }
         } else if (cmd.startsWith("set mask ")) {
           int p1 = -1, p2 = -1, p3 = -1;
@@ -2142,6 +2779,7 @@ static void Task_SerialConsole(void *) {
           if (m == "auto" || m == "1") {
             if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
               gState.autoMode = true;
+              gState.triggerImmediateTelem = true;
               xSemaphoreGive(xStateMutex);
             }
             gConfig.boot_auto_mode = 1;
@@ -2151,6 +2789,7 @@ static void Task_SerialConsole(void *) {
           } else if (m == "manual" || m == "man" || m == "0") {
             if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
               gState.autoMode = false;
+              gState.triggerImmediateTelem = true;
               xSemaphoreGive(xStateMutex);
             }
             gConfig.boot_auto_mode = 0;
@@ -2177,6 +2816,7 @@ static void Task_SerialConsole(void *) {
         } else if (cmd == "set defaults" || cmd == "defaults") {
           resetConfigToDefaults();
           saveConfig(true);
+          applyLoRaConfig();
           Serial.println("Config reset to defaults and saved to NVS.");
         } else if (cmd == "save") {
           saveConfig(true);
@@ -2264,11 +2904,12 @@ void setup() {
   }
 
   gState.autoMode = (bool)gConfig.boot_auto_mode;
-  
+  gState.activeTelemIntervalMs = gConfig.telemetry_idle_ms;
   gState.pumpEnabledAuto[0] = gConfig.pump_enabled_auto[0];
   gState.pumpEnabledAuto[1] = gConfig.pump_enabled_auto[1];
   gState.pumpEnabledAuto[2] = gConfig.pump_enabled_auto[2];
   gState.pond = gConfig.pond_enabled;
+  gState.triggerImmediateTelem = true; // Send initial boot telemetry packet
 
   if (!gState.autoMode) {
     const int rPin[3] = {RELAY_P1, RELAY_P2, RELAY_P3};
@@ -2282,11 +2923,11 @@ void setup() {
     }
   }
 
-  xTaskCreatePinnedToCore(Task_LoRaManager, "LoRaMgr", STACK_LORA_MGR, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(Task_LoRaManager, "LoRaMgr", STACK_LORA_MGR, NULL, 2, &xLoRaTask, 0);
   xTaskCreatePinnedToCore(Task_SerialConsole, "SerialCon", STACK_SERIAL_CON, NULL, 1, NULL, 0);
 #if ENABLE_DEBUG_WEB
   gDebugServerWanted = (gConfig.debug_mode_enabled || gConfig.web_always_on);
-  xTaskCreatePinnedToCore(Task_DebugWebServer, "DebugWeb", STACK_DEBUG_WEB, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(Task_DebugWebServer, "DebugWeb", STACK_DEBUG_WEB, NULL, 2, NULL, 0);
   if (gDebugServerWanted) {
     Serial.println("[Boot] WebServer auto-started by config (Always Available).");
   }

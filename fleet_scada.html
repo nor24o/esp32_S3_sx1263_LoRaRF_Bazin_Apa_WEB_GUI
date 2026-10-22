@@ -860,7 +860,9 @@
                     </div>
                     <div style="display:flex;align-items:center;gap:4px">
                       ${lockTag}
-                      <button class="btn" style="padding:2px 6px;font-size:0.62rem" onclick="sendCmd('/tank p${idx} toggle')">Toggle</button>
+                      <button class="btn btn-green" style="padding:2px 6px;font-size:0.62rem" onclick="sendCmd('/tank p${idx} on')">ON</button>
+                      <button class="btn btn-red" style="padding:2px 6px;font-size:0.62rem" onclick="sendCmd('/tank p${idx} off')">OFF</button>
+                      <button class="btn" style="padding:2px 6px;font-size:0.62rem" onclick="sendCmd('/tank p${idx} toggle')">Tog</button>
                     </div>
                   </div>
                 `;
@@ -941,12 +943,16 @@
         html += `<div class="card-actions">`;
         if (isTank) {
           const pondDem = Boolean(m.pond_demand);
+          const curSf = n.last_sf || 9;
           html += `
-            <button class="btn" onclick="sendCmd('/tank mode toggle')">🔄 Mode</button>
-            <button class="btn ${pondDem ? 'btn-red' : 'btn-green'}" onclick="sendCmd('/tank pond toggle')">
-              ${pondDem ? '🛑 Cancel Refill' : '🚀 Demand Refill'}
+            <button class="btn btn-green" onclick="sendCmd('/tank mode auto')">⚙️ AUTO</button>
+            <button class="btn btn-amber" onclick="sendCmd('/tank mode man')">🖐️ MAN</button>
+            <button class="btn ${pondDem ? 'btn-red' : 'btn-green'}" onclick="sendCmd('/tank pond ${pondDem ? 'off' : 'on'}')">
+              ${pondDem ? '🛑 Stop Refill' : '🚀 Demand Refill'}
             </button>
-            <button class="btn" onclick="sendCmd('/tank status')">ℹ️ Status</button>
+            <select style="background:#0b1120;color:#fff;border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-family:var(--font-mono);font-size:0.68rem;" onchange="sendCmd('/sf 2 ' + this.value)" title="Target Downlink SF">
+              ${[7,8,9,10,11,12].map(sf => `<option value="${sf}" ${sf===curSf?'selected':''}>SF${sf}</option>`).join('')}
+            </select>
           `;
         } else if (isPond) {
           html += `
@@ -961,7 +967,7 @@
       container.innerHTML = html;
     }
 
-    setInterval(refreshData, 1200);
+    setInterval(refreshData, 500);
     refreshData();
   </script>
 </body>

@@ -1,9 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-// Fallback embedded single-file SCADA Portal if LittleFS partition has not been flashed.
-static const char PAGE_INDEX_FALLBACK[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
+const char PAGE_INDEX_FALLBACK[] PROGMEM = R"RAW_HTML(<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -869,6 +867,12 @@ body {
   box-shadow: 0 0 8px var(--green-glow);
 }
 
+.pump-indicator.pond-ind.active {
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green-glow);
+  animation: pulseBeacon 1.2s infinite ease-in-out;
+}
+
 /* 3-Position Override Segmented Switch */
 .override-panel {
   background: #090d16;
@@ -1715,6 +1719,12 @@ body {
   border-color: rgba(239, 68, 68, 0.4);
 }
 
+.badge-tag.warn {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--amber);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
 .badge-tag.idle {
   background: #090d16;
   color: var(--text-dim);
@@ -1849,6 +1859,30 @@ body {
   letter-spacing: 0.05em;
   font-family: var(--font-mono);
   color: var(--text-main);
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.badge-icon {
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.subcard-icon {
+  font-size: 1.1rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.highlight {
+  color: var(--cyan);
+  font-weight: 700;
 }
 
 /* Settings Tabs */
@@ -2062,6 +2096,191 @@ body {
   transition: width 0.2s;
 }
 
+/* ─── QUICK NAVIGATION & OPERATOR ACTION BAR ─────────────────────── */
+.quick-nav-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: linear-gradient(90deg, rgba(17, 24, 39, 0.95), rgba(15, 23, 42, 0.95));
+  border: 1px solid rgba(14, 165, 233, 0.18);
+}
+
+.view-tab-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.view-tab-btn {
+  background: #0b0f19;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.view-tab-btn:hover {
+  color: var(--text-main);
+  border-color: rgba(255, 255, 255, 0.2);
+  background: #162032;
+}
+
+.view-tab-btn.active {
+  background: rgba(14, 165, 233, 0.16);
+  border-color: var(--cyan);
+  color: #38bdf8;
+  box-shadow: 0 0 12px rgba(14, 165, 233, 0.18);
+}
+
+.quick-action-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quick-rf-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: #090d16;
+  border: 1px solid rgba(14, 165, 233, 0.22);
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.69rem;
+  color: #cbd5e1;
+}
+
+.qrf-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green-glow);
+}
+
+.qrf-dot.burst {
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan-glow);
+  animation: pulseBeacon 0.9s infinite alternate;
+}
+
+.quick-sf-select {
+  background: #090d16;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #e2e8f0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.71rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.quick-sf-select:focus {
+  border-color: var(--cyan);
+  outline: none;
+}
+
+.q-act-btn {
+  padding: 6px 11px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.70rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.q-act-btn:active {
+  transform: scale(0.96);
+}
+
+.q-act-cyan {
+  background: rgba(14, 165, 233, 0.14);
+  border-color: rgba(14, 165, 233, 0.4);
+  color: #38bdf8;
+}
+.q-act-cyan:hover {
+  background: rgba(14, 165, 233, 0.26);
+  color: #fff;
+}
+
+.q-act-green {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+.q-act-green:hover {
+  background: rgba(16, 185, 129, 0.26);
+  color: #fff;
+}
+
+.q-act-red {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #f87171;
+}
+.q-act-red:hover {
+  background: rgba(239, 68, 68, 0.3);
+  color: #fff;
+}
+
+/* ─── POND DUAL-STATE ACCORD BADGES ──────────────────────────────── */
+.pond-badges-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-end;
+}
+
+.pond-accord-badge {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+}
+
+.pond-accord-badge.synced-on {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+
+.pond-accord-badge.syncing {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+  animation: pulseBeacon 0.9s infinite alternate;
+}
+
+.pond-toggle-btn.active-demand {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fca5a5;
+}
+.pond-toggle-btn.active-demand:hover {
+  background: rgba(239, 68, 68, 0.32);
+  color: #fff;
+}
+
+
 </style>
 </head>
 <body>
@@ -2085,15 +2304,47 @@ body {
           <span class="badge-icon">📶</span>
           <span id="badgeRssi">RSSI: -- dBm</span>
         </div>
+        <div class="badge" title="LoRa TX/RX Packet Counter (Event-Driven)">
+          <span class="badge-icon">⚡</span>
+          <span id="badgePktCnt">TX: 0 | RX: 0</span>
+        </div>
         <div class="badge" title="System Uptime">
           <span class="badge-icon">⏱️</span>
           <span id="badgeUptime">Up: 0s</span>
         </div>
+        <button class="icon-btn" id="btnTxNowHeader" onclick="triggerManualBeacon()" title="Transmit Immediate LoRa Status Beacon">📤</button>
         <button class="icon-btn" id="btnMatrixHeader" onclick="toggleMatrix()" title="Toggle Live Parameters & I/O Matrix">📊</button>
         <button class="icon-btn" id="btnAudioToggle" title="Toggle Sound FX">🔊</button>
         <button class="icon-btn" id="btnSettingsOpen" title="Settings & Network">⚙️</button>
       </div>
     </header>
+
+    <!-- Quick Navigation & Operator Action Bar -->
+    <nav class="quick-nav-bar glass-card">
+      <div class="view-tab-group">
+        <button class="view-tab-btn active" id="vTabAll" onclick="switchDashboardView('all')">🎛️ Full SCADA Deck</button>
+        <button class="view-tab-btn" id="vTabOps" onclick="switchDashboardView('ops')">💧 Hydraulic Control</button>
+        <button class="view-tab-btn" id="vTabMatrix" onclick="switchDashboardView('matrix')">⚡ Hardware I/O &amp; RF</button>
+        <button class="view-tab-btn" id="vTabRules" onclick="switchDashboardView('rules')">📋 Automation Rules</button>
+      </div>
+      <div class="quick-action-group">
+        <div class="quick-rf-pill" id="quickRfBar" title="Active LoRa Modulation, LDRO, and Time-on-Air">
+          <span class="qrf-dot" id="qrfDot"></span>
+          <span id="quickRfText">SF9 &bull; BW125 &bull; +22dBm &bull; ToA: --ms</span>
+        </div>
+        <select class="quick-sf-select" id="quickSfSelect" onchange="quickChangeSf(this.value)" title="Instant Spreading Factor Switch">
+          <option value="7">SF7 (Fast)</option>
+          <option value="8">SF8</option>
+          <option value="9" selected>SF9 (Bal)</option>
+          <option value="10">SF10 (700m+)</option>
+          <option value="11">SF11 (LDRO)</option>
+          <option value="12">SF12 (Max)</option>
+        </select>
+        <button class="q-act-btn q-act-cyan" onclick="triggerManualBeacon()" title="Transmit 1 Status Packet Now">📡 Beacon TX</button>
+        <button class="q-act-btn q-act-green" onclick="resetAllOverrides()" title="Return P1, P2, P3 to AUTO Schedule">🔄 All AUTO</button>
+        <button class="q-act-btn q-act-red" onclick="emergencyStopPumps()" title="Lock OFF all 3 Outflow Pumps immediately">🛑 E-Stop P1-P3</button>
+      </div>
+    </nav>
 
     <!-- ISA-18.2 Priority Alarm & Operational Status Banner -->
     <div class="alarm-banner-container glass-card" id="alarmBanner">
@@ -2105,9 +2356,10 @@ body {
         </div>
       </div>
       <div class="alarm-right-metrics">
-        <div class="banner-pill" title="Current Automation Rule active on ESP32-S3"><span class="bp-label">HYDRAULIC RULE:</span> <span class="bp-val" id="bannerActiveRule">RULE 2 (MID WL)</span></div>
-        <div class="banner-pill" title="Pumps with active manual overrides"><span class="bp-label">ACTIVE OVERRIDES:</span> <span class="bp-val" id="bannerOverrides">NONE (AUTO)</span></div>
+        <div class="banner-pill" title="Current Automation Rule active on ESP32-S3"><span class="bp-label">RULE:</span> <span class="bp-val" id="bannerActiveRule">RULE 2 (MID WL)</span></div>
+        <div class="banner-pill" title="Pumps with active manual overrides"><span class="bp-label">OVERRIDES:</span> <span class="bp-val" id="bannerOverrides">NONE (AUTO)</span></div>
         <div class="banner-pill" title="LoRa remote pond refill latch"><span class="bp-label">POND REFILL:</span> <span class="bp-val" id="bannerLatch">IDLE</span></div>
+        <div class="banner-pill" title="Event-Driven Radio Telemetry State"><span class="bp-label">RADIO MODE:</span> <span class="bp-val" id="bannerRadioMode">SILENT IDLE</span></div>
       </div>
     </div>
 
@@ -2415,13 +2667,16 @@ body {
               <span class="pump-indicator pond-ind" id="indPond"></span>
               <div>
                 <h4>REMOTE POND REFILL PUMP</h4>
-                <span class="pump-sub-tag">SX1262 LoRa Node 0x03 &bull; EU868</span>
+                <span class="pump-sub-tag">SX1262 LoRa Node 0x03 &bull; EU868 Accord</span>
               </div>
             </div>
             <p class="pond-desc" id="pondDesc">Refills reservoir via telemetry demand packet. Auto trigger at &le; L1, cutoff at &ge; L3.</p>
           </div>
           <div class="pond-actions">
-            <div class="charge-latch-badge" id="latchBadge">LATCH: IDLE</div>
+            <div class="pond-badges-stack">
+              <div class="charge-latch-badge" id="latchBadge">DEMAND: IDLE</div>
+              <div class="pond-accord-badge" id="pondAccordBadge">0x03 ACK: STANDBY</div>
+            </div>
             <button class="pond-toggle-btn" id="btnPond" onclick="togglePond()">REQUEST REFILL</button>
           </div>
         </div>
@@ -2722,6 +2977,31 @@ body {
               <span class="m-col-val" id="mRadioHealth"><span class="badge-tag ok">ONLINE</span></span>
             </div>
             <div class="matrix-row">
+              <span class="m-col-pin">RF MOD</span>
+              <span class="m-col-name">Modulation &amp; TX Power</span>
+              <span class="m-col-val" id="mRfModulation">868.1 MHz &bull; SF9 BW125 (+22 dBm)</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">AIRTIME</span>
+              <span class="m-col-name">LDRO Engine &amp; Packet ToA</span>
+              <span class="m-col-val" id="mRfToaLdro"><span class="badge-tag idle">LDRO: OFF</span> &bull; ToA: -- ms</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">CAD / LBT</span>
+              <span class="m-col-name">4-Symbol Hardware CAD</span>
+              <span class="m-col-val" id="mRfCadLbt"><span class="badge-tag ok">4-SYMB CAD</span> &bull; Deferrals: 0</span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">TELEM</span>
+              <span class="m-col-name">Event-Driven Dual-Rate Engine</span>
+              <span class="m-col-val" id="mTelemRateMode"><span class="badge-tag idle">SILENT IDLE (600s)</span></span>
+            </div>
+            <div class="matrix-row">
+              <span class="m-col-pin">PACKETS</span>
+              <span class="m-col-name">LoRa TX / RX Frame Counters</span>
+              <span class="m-col-val" id="mRfPktStats">TX: 0 &bull; RX: 0 (Idle)</span>
+            </div>
+            <div class="matrix-row">
               <span class="m-col-pin">NODES</span>
               <span class="m-col-name">Tank: 0x02 | GW: 0x01 | Pond: 0x03</span>
               <span class="m-col-val"><span class="badge-tag ok">CONFIGURED</span></span>
@@ -2850,49 +3130,70 @@ body {
           <div class="form-grid-2">
             <div class="form-row">
               <label for="cfgCapacity">Reservoir Capacity (L):</label>
-              <input type="number" id="cfgCapacity" min="100" max="1000000" step="500" value="10000">
+              <input type="number" id="cfgCapacity" min="100" max="1000000" step="100" value="10000">
             </div>
             <div class="form-row">
-              <label for="cfgTrigger">Refill Trigger (Low):</label>
+              <label for="cfgBootAuto">Default Boot Mode:</label>
+              <select id="cfgBootAuto">
+                <option value="0">Manual Mode</option>
+                <option value="1">Automatic Mode</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgTrigger">Refill Trigger (Low L0-L2):</label>
               <select id="cfgTrigger">
                 <option value="0">Level 0 (Empty 0%)</option>
                 <option value="1" selected>Level 1 (Low 33%)</option>
                 <option value="2">Level 2 (Mid 66%)</option>
               </select>
             </div>
-          </div>
-          <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgCutoff">Refill Cutoff (Full):</label>
+              <label for="cfgCutoff">Refill Cutoff (Full L1-L3):</label>
               <select id="cfgCutoff">
+                <option value="1">Level 1 (Low 33%)</option>
                 <option value="2">Level 2 (Mid 66%)</option>
                 <option value="3" selected>Level 3 (Full 100%)</option>
               </select>
             </div>
+          </div>
+          <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgTelem">Telemetry Interval (ms):</label>
-              <input type="number" id="cfgTelem" min="2000" max="300000" step="1000" value="30000">
+              <label for="cfgTelemIdle">Silent Idle Keepalive (ms):</label>
+              <input type="number" id="cfgTelemIdle" min="5000" max="3600000" step="5000" value="600000" title="Default 600,000 ms (10 min). Range: 5s to 60 min">
+            </div>
+            <div class="form-row">
+              <label for="cfgTelemBurst">Active Burst Interval (ms):</label>
+              <input type="number" id="cfgTelemBurst" min="1000" max="60000" step="500" value="3000" title="Default 3,000 ms (3.0s). Range: 1.0s to 60.0s">
             </div>
           </div>
           <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgRuntime">Min Runtime (ms):</label>
+              <label for="cfgRuntime">Pump Min Runtime (ms):</label>
               <input type="number" id="cfgRuntime" min="1000" max="300000" step="1000" value="20000">
             </div>
             <div class="form-row">
-              <label for="cfgCooldown">Min Cooldown (ms):</label>
-              <input type="number" id="cfgCooldown" min="5000" max="600000" step="1000" value="20000">
+              <label for="cfgCooldown">Pump Min Cooldown (ms):</label>
+              <input type="number" id="cfgCooldown" min="1000" max="600000" step="1000" value="20000">
             </div>
           </div>
-          <div class="form-row checkbox-row" style="margin-top:8px;">
-            <label for="cfgBootAuto">Default Boot Mode:</label>
-            <select id="cfgBootAuto">
-              <option value="0">Manual Mode</option>
-              <option value="1">Automatic Mode</option>
-            </select>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgStagger">Motor Anti-Inrush Stagger (ms):</label>
+              <input type="number" id="cfgStagger" min="0" max="60000" step="500" value="3000">
+            </div>
+            <div class="form-row">
+              <label>Auto Pump Masks (P1-P3):</label>
+              <div style="display:flex; gap:12px; align-items:center; margin-top:8px;">
+                <label class="auto-mask-check"><input type="checkbox" id="cfgMaskP1" checked><span>P1</span></label>
+                <label class="auto-mask-check"><input type="checkbox" id="cfgMaskP2" checked><span>P2</span></label>
+                <label class="auto-mask-check"><input type="checkbox" id="cfgMaskP3" checked><span>P3</span></label>
+              </div>
+            </div>
           </div>
           <div class="modal-actions" style="margin-top:14px;">
-            <button class="btn btn-primary" onclick="saveHydraulicsConfig()">SAVE HYDRAULICS</button>
+            <button class="btn btn-primary" onclick="saveHydraulicsConfig()">SAVE HYDRAULICS &amp; TIMINGS</button>
           </div>
         </div>
 
@@ -2904,25 +3205,26 @@ body {
               <input type="number" id="cfgLoraFreq" min="150000000" max="960000000" step="100000" value="868100000">
             </div>
             <div class="form-row">
-              <label for="cfgLoraPwr">TX Power (dBm, 2..22):</label>
-              <input type="number" id="cfgLoraPwr" min="-9" max="22" step="1" value="14">
+              <label for="cfgLoraPwr">TX Power (dBm, -9..+22):</label>
+              <input type="number" id="cfgLoraPwr" min="-9" max="22" step="1" value="22">
             </div>
           </div>
           <div class="form-grid-2">
             <div class="form-row">
-              <label for="cfgLoraSf">Spreading Factor (SF):</label>
-              <select id="cfgLoraSf">
+              <label for="cfgLoraSf">Spreading Factor (SF6-SF12):</label>
+              <select id="cfgLoraSf" onchange="previewLoraAirtime()">
+                <option value="6">SF6 (Ultra-Fast / Short Range)</option>
                 <option value="7">SF7 (Fast / High Data Rate)</option>
                 <option value="8">SF8</option>
                 <option value="9" selected>SF9 (Balanced Default)</option>
-                <option value="10">SF10</option>
-                <option value="11">SF11</option>
-                <option value="12">SF12 (Longest Range / Penetration)</option>
+                <option value="10">SF10 (Long Range 700m+)</option>
+                <option value="11">SF11 (High Penetration + Auto LDRO)</option>
+                <option value="12">SF12 (Maximum Penetration + Auto LDRO)</option>
               </select>
             </div>
             <div class="form-row">
               <label for="cfgLoraBw">Bandwidth (kHz):</label>
-              <select id="cfgLoraBw">
+              <select id="cfgLoraBw" onchange="previewLoraAirtime()">
                 <option value="125" selected>125 kHz (Standard EU868)</option>
                 <option value="250">250 kHz</option>
                 <option value="500">500 kHz</option>
@@ -2932,7 +3234,7 @@ body {
           <div class="form-grid-2">
             <div class="form-row">
               <label for="cfgLoraCr">Coding Rate (CR):</label>
-              <select id="cfgLoraCr">
+              <select id="cfgLoraCr" onchange="previewLoraAirtime()">
                 <option value="5" selected>4/5 (Standard FEC)</option>
                 <option value="6">4/6</option>
                 <option value="7">4/7</option>
@@ -2947,16 +3249,32 @@ body {
           <div class="form-grid-2">
             <div class="form-row">
               <label for="cfgLoraLdro">Low Data Rate Optimize (LDRO):</label>
-              <select id="cfgLoraLdro">
-                <option value="0" selected>Auto (Mandatory on SF11/SF12 @ 125kHz)</option>
+              <select id="cfgLoraLdro" onchange="previewLoraAirtime()">
+                <option value="0" selected>Auto (Active when Tsym &ge; 16.0 ms)</option>
                 <option value="1">Force Enabled (Always ON)</option>
                 <option value="2">Force Disabled (Always OFF)</option>
               </select>
             </div>
             <div class="form-row">
-              <label>Active Demodulator LDRO:</label>
-              <div id="ldroLiveBadge" class="badge-tag idle" style="margin-top:6px; display:inline-block; font-size:11px;">LDRO: INACTIVE</div>
+              <label>Active Demodulator LDRO &amp; ToA:</label>
+              <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">
+                <span id="ldroLiveBadge" class="badge-tag idle" style="font-size:11px;">LDRO: INACTIVE</span>
+                <span id="toaLiveBadge" class="badge-tag active" style="font-size:11px;">ToA: -- ms</span>
+              </div>
             </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-row">
+              <label for="cfgLbtRetries">LBT Hardware CAD Retries (0-10):</label>
+              <input type="number" id="cfgLbtRetries" min="0" max="10" step="1" value="4">
+            </div>
+            <div class="form-row">
+              <label for="cfgLbtBackoff">LBT Base Jitter Backoff (ms):</label>
+              <input type="number" id="cfgLbtBackoff" min="10" max="2000" step="10" value="60">
+            </div>
+          </div>
+          <div style="margin-top:6px; padding:8px 12px; border-radius:8px; background:rgba(14,165,233,0.08); border:1px solid rgba(14,165,233,0.2); font-size:0.72rem; font-family:var(--font-mono); color:var(--cyan);" id="cadLiveSummary">
+            🛡️ LBT 4-Symbol Hardware CAD (SX126X_CAD_ON_4_SYMB) Active &bull; Guard: -- ms &bull; Deferrals: 0
           </div>
           <div class="modal-actions" style="margin-top:14px;">
             <button class="btn btn-primary" onclick="saveLoraConfig()">APPLY &amp; SAVE LORA RF</button>
@@ -3181,16 +3499,23 @@ function renderTelemetry(t) {
     if (alarmBeacon) alarmBeacon.className = "alarm-beacon critical";
     if (alarmTitle) alarmTitle.innerText = "RADIO FAULT • SX1262 LoRa SPI LINK LOST";
     if (alarmDesc) alarmDesc.innerText = "LoRa transceiver not responding to SPI transactions. Remote telemetry unreachable.";
+  } else if (t.err === 3) {
+    if (alarmContainer) alarmContainer.className = "alarm-banner-container warning glass-card";
+    if (alarmBeacon) alarmBeacon.className = "alarm-beacon warning";
+    if (alarmTitle) alarmTitle.innerText = "NETWORK WARNING • LORA GATEWAY TIMEOUT";
+    if (alarmDesc) alarmDesc.innerText = "No downlink heartbeat received from LoRa Gateway Coordinator (>15 min silent).";
   } else if (t.wl === 0) {
     if (alarmContainer) alarmContainer.className = "alarm-banner-container critical glass-card";
     if (alarmBeacon) alarmBeacon.className = "alarm-beacon critical";
     if (alarmTitle) alarmTitle.innerText = "CRITICAL TRIP • LEVEL 0 DRY-RUN PROTECTION ACTIVE";
     if (alarmDesc) alarmDesc.innerText = "Reservoir is empty (<1,000L). All outflow pumps locked out to protect against cavitation. Pond refill prioritized.";
   } else {
+    const staggerSec = ((t.cfg_stagger !== undefined ? t.cfg_stagger : 3000) / 1000).toFixed(1);
+    const runSec = Math.round((t.cfg_runtime || 20000) / 1000);
     if (alarmContainer) alarmContainer.className = "alarm-banner-container glass-card";
     if (alarmBeacon) alarmBeacon.className = "alarm-beacon normal";
     if (alarmTitle) alarmTitle.innerText = "NORMAL OPERATION • ALL INTERLOCKS NOMINAL";
-    if (alarmDesc) alarmDesc.innerText = "Water level within operating limits. Anti-inrush start stagger (3s) and anti-chatter locks active.";
+    if (alarmDesc) alarmDesc.innerText = `Water level within operating limits. Anti-inrush start stagger (${staggerSec}s) and anti-chatter (${runSec}s) locks active.`;
   }
 
   // Active Rule determination (firmware streams t.active_rule: 1..4)
@@ -3227,29 +3552,76 @@ function renderTelemetry(t) {
 
   const bLatch = document.getElementById("bannerLatch");
   if (bLatch) {
-    bLatch.innerText = t.demand ? "CHARGING LATCH ACTIVE" : "IDLE";
-    bLatch.style.color = t.demand ? "var(--green)" : "var(--muted)";
+    if (t.demand && t.pond) {
+      bLatch.innerText = "PUMPING (0x03 ACK)";
+      bLatch.style.color = "var(--green)";
+    } else if (t.demand) {
+      bLatch.innerText = "DEMAND ON (SYNCING)";
+      bLatch.style.color = "var(--amber)";
+    } else {
+      bLatch.innerText = "IDLE";
+      bLatch.style.color = "var(--muted)";
+    }
   }
 
-  // Active Demodulator LDRO status badge in modal
+  const bRadioMode = document.getElementById("bannerRadioMode");
+  if (bRadioMode) {
+    const burst = Boolean(t.burst_mode);
+    bRadioMode.innerText = burst ? "EVENT BURST" : "SILENT IDLE";
+    bRadioMode.style.color = burst ? "var(--cyan)" : "var(--green)";
+  }
+
+  // Quick RF Bar & Quick SF Selector
+  const qRfTxt = document.getElementById("quickRfText");
+  const qRfDot = document.getElementById("qrfDot");
+  const qSfSel = document.getElementById("quickSfSelect");
+  if (qRfTxt && t.lora_sf !== undefined) {
+    const bwKhz = (t.lora_bw > 1000) ? Math.round(t.lora_bw / 1000) : (t.lora_bw || 125);
+    const pwr = (t.lora_power !== undefined) ? t.lora_power : (t.lora_pwr !== undefined ? t.lora_pwr : 22);
+    const ldroTag = t.ldro_active ? "LDRO" : `4/${t.lora_cr || 5}`;
+    qRfTxt.innerText = `SF${t.lora_sf} • ${bwKhz}k • +${pwr}dBm • ${ldroTag} • ToA:${t.toa_ms || '--'}ms`;
+  }
+  if (qRfDot) {
+    qRfDot.classList.toggle("burst", Boolean(t.burst_mode));
+  }
+  if (qSfSel && t.lora_sf !== undefined && document.activeElement !== qSfSel) {
+    qSfSel.value = String(t.lora_sf);
+  }
+
+  // Header TX / RX Counter Badge
+  const bPkt = document.getElementById("badgePktCnt");
+  if (bPkt && t.tx_cnt !== undefined) {
+    bPkt.innerText = `TX: ${t.tx_cnt} | RX: ${t.rx_cnt || 0}`;
+  }
+
+  // Active Demodulator LDRO, ToA, and CAD status badges in modal
   const ldroBadge = document.getElementById("ldroLiveBadge");
   if (ldroBadge && t.ldro_active !== undefined) {
     if (t.ldro_active) {
       ldroBadge.className = "badge-tag running";
-      ldroBadge.innerText = t.lora_ldro === 1 ? "FORCE ON (ACTIVE)" : `AUTO (ACTIVE ON SF${t.lora_sf || 11})`;
+      ldroBadge.innerText = t.lora_ldro === 1 ? "LDRO: FORCE ON" : `LDRO: AUTO ON (SF${t.lora_sf || 11})`;
     } else {
       ldroBadge.className = "badge-tag idle";
-      ldroBadge.innerText = t.lora_ldro === 2 ? "FORCE OFF" : "INACTIVE";
+      ldroBadge.innerText = t.lora_ldro === 2 ? "LDRO: FORCE OFF" : `LDRO: OFF (SF${t.lora_sf || 9})`;
     }
   }
+  const toaBadge = document.getElementById("toaLiveBadge");
+  if (toaBadge && t.toa_ms !== undefined) {
+    toaBadge.innerText = `ToA: ${t.toa_ms} ms • Tsym: ${(t.sym_ms || 0).toFixed(2)} ms`;
+  }
+  const cadSum = document.getElementById("cadLiveSummary");
+  if (cadSum) {
+    cadSum.innerText = `🛡️ LBT 4-Symbol Hardware CAD (SX126X_CAD_ON_4_SYMB) Active • Guard: ${t.guard_ms || 400} ms • Deferrals: ${t.cad_busy_cnt || 0}`;
+  }
 
-  // 1. Water Level Height & Text
+  // 1. Dynamic Reservoir Capacity & Water Level Height/Text
+  const capLiters = t.tank_capacity || 10000;
   const heights = [0, 33, 66, 100];
   const labels = [
-    "WL: 0 (EMPTY 0% <1,000L)",
-    "WL: 1 (LOW 33% ~3,300L)",
-    "WL: 2 (MID 66% ~6,600L)",
-    "WL: 3 (FULL 100% ~10,000L)"
+    `WL: 0 (EMPTY 0% <${Math.round(capLiters * 0.1).toLocaleString()}L)`,
+    `WL: 1 (LOW 33% ~${Math.round(capLiters * 0.33).toLocaleString()}L)`,
+    `WL: 2 (MID 66% ~${Math.round(capLiters * 0.66).toLocaleString()}L)`,
+    `WL: 3 (FULL 100% ~${capLiters.toLocaleString()}L)`
   ];
   const wl = Math.min(Math.max(t.wl, 0), 3);
 
@@ -3257,6 +3629,11 @@ function renderTelemetry(t) {
   if (liquidBody) liquidBody.style.height = `${heights[wl]}%`;
   const lvlText = document.getElementById("tankLevelText");
   if (lvlText) lvlText.innerText = labels[wl];
+
+  const pondDesc = document.getElementById("pondDesc");
+  if (pondDesc && t.refill_trigger !== undefined && t.refill_cutoff !== undefined) {
+    pondDesc.innerText = `Refills reservoir via telemetry demand packet. Auto trigger at ≤ L${t.refill_trigger}, cutoff at ≥ L${t.refill_cutoff}.`;
+  }
 
   // 2. Float Sensor Buoys (L1, L2, L3)
   const b1 = document.getElementById("beadL1");
@@ -3283,6 +3660,10 @@ function renderTelemetry(t) {
       alertBar.classList.add("alert");
       healthText.innerText = "HARDWARE FAULT: PCF8574 I²C Bus Disconnected!";
       if (lastErrorCode !== 2) playAlert();
+    } else if (t.err === 3) { // ERR_GATEWAY_TIMEOUT
+      alertBar.classList.add("alert");
+      healthText.innerText = "NETWORK WARNING: LoRa Gateway Coordinator Silent (>15 min)!";
+      if (lastErrorCode !== 3) playAlert();
     } else {
       if (b1) b1.classList.remove("fault");
       if (b2) b2.classList.remove("fault");
@@ -3296,21 +3677,42 @@ function renderTelemetry(t) {
   // 3. Inflow Pipe (From Remote Pond)
   const inflowWater = document.getElementById("inflowPipeWater");
   const waterJet = document.getElementById("waterJet");
-  const pondActive = Boolean(t.pond);
+  const pondDemand = Boolean(t.demand);
+  const pondRemoteAck = Boolean(t.pond);
+  const pondFlowVisual = pondDemand || pondRemoteAck;
 
-  if (inflowWater) inflowWater.classList.toggle("active", pondActive);
-  if (waterJet) waterJet.classList.toggle("active", pondActive);
+  if (inflowWater) inflowWater.classList.toggle("active", pondFlowVisual);
+  if (waterJet) waterJet.classList.toggle("active", pondFlowVisual);
 
-  // Pond Controller Card
+  // Pond Controller Card (Dual-State: Local Demand vs Remote 0x03 Accord)
   const indPond = document.getElementById("indPond");
   const btnPond = document.getElementById("btnPond");
   const latchBadge = document.getElementById("latchBadge");
+  const accordBadge = document.getElementById("pondAccordBadge");
 
-  if (indPond) indPond.classList.toggle("active", pondActive);
-  if (btnPond) btnPond.innerText = pondActive ? "STOP POND" : "REQUEST REFILL";
+  if (indPond) indPond.classList.toggle("active", pondFlowVisual);
+  if (btnPond) {
+    btnPond.innerText = pondDemand ? "STOP POND REFILL" : "REQUEST REFILL";
+    btnPond.classList.toggle("active-demand", pondDemand);
+  }
   if (latchBadge) {
-    latchBadge.innerText = t.demand ? "CHARGING LATCH: ON" : "LATCH: IDLE";
-    latchBadge.classList.toggle("active", Boolean(t.demand));
+    latchBadge.innerText = pondDemand ? "DEMAND LATCH: ON" : "DEMAND: IDLE";
+    latchBadge.classList.toggle("active", pondDemand);
+  }
+  if (accordBadge) {
+    if (pondDemand && pondRemoteAck) {
+      accordBadge.innerText = "0x03 ACK: PUMPING";
+      accordBadge.className = "pond-accord-badge synced-on";
+    } else if (pondDemand && !pondRemoteAck) {
+      accordBadge.innerText = "0x03 ACK: SYNCING...";
+      accordBadge.className = "pond-accord-badge syncing";
+    } else if (!pondDemand && pondRemoteAck) {
+      accordBadge.innerText = "0x03 ACK: STOPPING...";
+      accordBadge.className = "pond-accord-badge syncing";
+    } else {
+      accordBadge.innerText = "0x03 ACK: STANDBY";
+      accordBadge.className = "pond-accord-badge";
+    }
   }
 
   // 4. Outflow Pipes & Pump Faceplates (P1, P2, P3)
@@ -3504,14 +3906,20 @@ function renderTelemetry(t) {
 function renderConfig(c) {
   const rInput = document.getElementById("cfgRuntime");
   const cInput = document.getElementById("cfgCooldown");
-  const tInput = document.getElementById("cfgTelem");
+  const stgInput = document.getElementById("cfgStagger");
+  const tiInput = document.getElementById("cfgTelemIdle");
+  const tbInput = document.getElementById("cfgTelemBurst");
   const bSelect = document.getElementById("cfgBootAuto");
   const aCheck = document.getElementById("cfgAlwaysOn");
   const sInput = document.getElementById("cfgStaSsid");
 
   if (rInput && c.runtime !== undefined) rInput.value = c.runtime;
   if (cInput && c.cooldown !== undefined) cInput.value = c.cooldown;
-  if (tInput && c.telem !== undefined) tInput.value = c.telem;
+  if (stgInput && c.stagger !== undefined) stgInput.value = c.stagger;
+  if (tiInput && (c.telem_idle !== undefined || c.telem !== undefined)) {
+    tiInput.value = (c.telem_idle !== undefined) ? c.telem_idle : c.telem;
+  }
+  if (tbInput && c.telem_burst !== undefined) tbInput.value = c.telem_burst;
   if (bSelect && c.boot_auto !== undefined) bSelect.value = c.boot_auto;
   if (aCheck && c.always_on !== undefined) aCheck.checked = Boolean(c.always_on);
   if (sInput && c.sta_ssid) sInput.value = c.sta_ssid;
@@ -3520,11 +3928,21 @@ function renderConfig(c) {
   const capInput = document.getElementById("cfgCapacity");
   const trigSelect = document.getElementById("cfgTrigger");
   const cutSelect = document.getElementById("cfgCutoff");
-  if (capInput && c.tank_capacity) capInput.value = c.tank_capacity;
+  if (capInput && c.tank_capacity) {
+    capInput.value = c.tank_capacity;
+    tankCapacityLiters = c.tank_capacity;
+  }
   if (trigSelect && c.refill_trigger !== undefined) trigSelect.value = c.refill_trigger;
   if (cutSelect && c.refill_cutoff !== undefined) cutSelect.value = c.refill_cutoff;
 
-  // LoRa RF
+  if (c.auto_mask && Array.isArray(c.auto_mask)) {
+    for (let i = 0; i < 3; i++) {
+      const mChk = document.getElementById(`cfgMaskP${i + 1}`);
+      if (mChk) mChk.checked = Boolean(c.auto_mask[i]);
+    }
+  }
+
+  // LoRa RF & LBT
   const freqInput = document.getElementById("cfgLoraFreq");
   const pwrInput = document.getElementById("cfgLoraPwr");
   const sfSelect = document.getElementById("cfgLoraSf");
@@ -3532,6 +3950,9 @@ function renderConfig(c) {
   const crSelect = document.getElementById("cfgLoraCr");
   const ldroSelect = document.getElementById("cfgLoraLdro");
   const syncInput = document.getElementById("cfgLoraSync");
+  const lbtRetInput = document.getElementById("cfgLbtRetries");
+  const lbtBackInput = document.getElementById("cfgLbtBackoff");
+
   if (freqInput && c.lora_freq) freqInput.value = c.lora_freq;
   if (pwrInput && c.lora_power !== undefined) pwrInput.value = c.lora_power;
   if (sfSelect && c.lora_sf) sfSelect.value = c.lora_sf;
@@ -3539,6 +3960,51 @@ function renderConfig(c) {
   if (crSelect && c.lora_cr) crSelect.value = c.lora_cr;
   if (ldroSelect && c.lora_ldro !== undefined) ldroSelect.value = c.lora_ldro;
   if (syncInput && c.lora_sync) syncInput.value = c.lora_sync;
+  if (lbtRetInput && c.lbt_retries !== undefined) lbtRetInput.value = c.lbt_retries;
+  if (lbtBackInput && c.lbt_backoff !== undefined) lbtBackInput.value = c.lbt_backoff;
+
+  previewLoraAirtime();
+}
+
+function previewLoraAirtime() {
+  const sfEl = document.getElementById("cfgLoraSf");
+  const bwEl = document.getElementById("cfgLoraBw");
+  const crEl = document.getElementById("cfgLoraCr");
+  const ldroEl = document.getElementById("cfgLoraLdro");
+  if (!sfEl || !bwEl || !crEl || !ldroEl) return;
+
+  const sf = parseInt(sfEl.value, 10) || 9;
+  const rawBw = parseInt(bwEl.value, 10) || 125;
+  const bwKhz = rawBw > 1000 ? (rawBw / 1000.0) : rawBw;
+  const cr = parseInt(crEl.value, 10) || 5;
+  const ldroMode = parseInt(ldroEl.value, 10) || 0;
+
+  const tSymMs = Math.pow(2, sf) / bwKhz;
+  const ldroOn = (ldroMode === 1) ? true : (ldroMode === 2 ? false : (tSymMs >= 16.0));
+  const de = ldroOn ? 1 : 0;
+  const tPreamble = (8.0 + 4.25) * tSymMs;
+  const num = 8.0 * 17.0 - 4.0 * sf + 28.0 + 16.0;
+  const den = 4.0 * (sf - 2.0 * de);
+  let payloadSymbNb = 8.0;
+  if (den > 0) {
+    const c = Math.ceil(num / den);
+    if (c > 0) payloadSymbNb += c * cr;
+  }
+  const toaMs = Math.round(tPreamble + payloadSymbNb * tSymMs);
+  const sfFloor = (sf >= 12) ? 1800 : (sf === 11 ? 1200 : (sf === 10 ? 800 : 400));
+  const guardMs = Math.max(sfFloor, Math.floor((toaMs * 3) / 2));
+
+  const ldroBadge = document.getElementById("ldroLiveBadge");
+  if (ldroBadge) {
+    const modeStr = ldroMode === 0 ? "AUTO" : (ldroMode === 1 ? "FORCE ON" : "FORCE OFF");
+    ldroBadge.innerText = `LDRO: ${ldroOn ? "ON" : "OFF"} (${modeStr} | Tsym=${tSymMs.toFixed(2)}ms)`;
+    ldroBadge.className = ldroOn ? "badge-tag ok" : "badge-tag idle";
+  }
+
+  const toaBadge = document.getElementById("toaLiveBadge");
+  if (toaBadge) {
+    toaBadge.innerText = `ToA: ${toaMs} ms | Guard: ${guardMs} ms`;
+  }
 }
 
 // ─── REAL-TIME SPARKLINE CANVAS GRAPH ──────────────────────────────
@@ -3607,9 +4073,73 @@ function updateSparkline(level, rssi) {
 }
 
 // ─── USER ACTIONS & COMMANDS ───────────────────────────────────────
+function switchDashboardView(view) {
+  playClick();
+  const mainGrid = document.querySelector(".main-grid");
+  const autoSec = document.getElementById("automationMatrixSection");
+  const liveSec = document.getElementById("ioMatrixSection");
+  const matrixContent = document.getElementById("matrixContent");
+
+  document.querySelectorAll(".view-tab-btn").forEach(b => b.classList.remove("active"));
+  if (view === "all") {
+    document.getElementById("vTabAll")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "";
+    if (autoSec) autoSec.style.display = "";
+    if (liveSec) liveSec.style.display = "";
+  } else if (view === "ops") {
+    document.getElementById("vTabOps")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "";
+    if (autoSec) autoSec.style.display = "none";
+    if (liveSec) liveSec.style.display = "none";
+  } else if (view === "matrix") {
+    document.getElementById("vTabMatrix")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "none";
+    if (autoSec) autoSec.style.display = "none";
+    if (liveSec) liveSec.style.display = "";
+    if (matrixContent) matrixContent.classList.remove("collapsed");
+  } else if (view === "rules") {
+    document.getElementById("vTabRules")?.classList.add("active");
+    if (mainGrid) mainGrid.style.display = "none";
+    if (autoSec) autoSec.style.display = "";
+    if (liveSec) liveSec.style.display = "none";
+  }
+}
+
+function triggerManualBeacon() {
+  playClick();
+  sendJson({ cmd: "tx_now" });
+}
+
+function resetAllOverrides() {
+  playClick();
+  sendJson({ cmd: "reset_overrides" });
+}
+
+function emergencyStopPumps() {
+  playAlert();
+  for (let id = 1; id <= 3; id++) {
+    sendJson({ cmd: "set_pump_override", id: id, mode: "FORCE_OFF", duration: 0 });
+  }
+  showToast("E-STOP: All 3 Outflow Pumps Locked OFF!", true);
+}
+
+function quickChangeSf(sfVal) {
+  playChime();
+  const sf = parseInt(sfVal, 10);
+  if (isNaN(sf) || sf < 6 || sf > 12) return;
+  const sfSelect = document.getElementById("cfgLoraSf");
+  if (sfSelect) sfSelect.value = sf;
+  // Only send the SF field; firmware keeps all other RF parameters untouched
+  sendJson({ cmd: "set_lora_config", sf: sf });
+}
+
 function setMode(isAuto) {
   playClick();
-  sendJson({ cmd: "mode" });
+  const btnAuto = document.getElementById("btnModeAuto");
+  const btnMan = document.getElementById("btnModeMan");
+  if (btnAuto) btnAuto.classList.toggle("active", Boolean(isAuto));
+  if (btnMan) btnMan.classList.toggle("active", !isAuto);
+  sendJson({ cmd: "mode", val: isAuto ? 1 : 0 });
 }
 
 function setPumpOverride(id, mode, durationMin = null) {
@@ -3636,11 +4166,27 @@ function onDurationChange(id) {
 
 function togglePump(id) {
   playClick();
-  sendJson({ cmd: "pump", id: id });
+  const t = lastTelemetryObj;
+  if (t && t.mode === "AUTO") {
+    const isCurrentlyRunning = Boolean(t.pumps?.[id - 1]);
+    const durSelect = document.getElementById(`durP${id}`);
+    const dur = durSelect ? parseInt(durSelect.value, 10) : 0;
+    // In AUTO mode, START/STOP P# directly sets FORCE ON (1) or LOCK OFF (2)
+    sendJson({
+      cmd: "set_pump_override",
+      id: id,
+      mode: isCurrentlyRunning ? "FORCE_OFF" : "FORCE_ON",
+      duration: isCurrentlyRunning ? 0 : dur
+    });
+  } else {
+    sendJson({ cmd: "pump", id: id });
+  }
 }
 
 function togglePond() {
   playClick();
+  const btnPond = document.getElementById("btnPond");
+  if (btnPond) btnPond.innerText = "SYNCING...";
   sendJson({ cmd: "pond" });
 }
 
@@ -3693,25 +4239,29 @@ function saveHydraulicsConfig() {
   const cap = parseInt(document.getElementById("cfgCapacity").value, 10);
   const trig = parseInt(document.getElementById("cfgTrigger").value, 10);
   const cut = parseInt(document.getElementById("cfgCutoff").value, 10);
+  const m1 = document.getElementById("cfgMaskP1")?.checked ? 1 : 0;
+  const m2 = document.getElementById("cfgMaskP2")?.checked ? 1 : 0;
+  const m3 = document.getElementById("cfgMaskP3")?.checked ? 1 : 0;
+  const r = parseInt(document.getElementById("cfgRuntime").value, 10);
+  const c = parseInt(document.getElementById("cfgCooldown").value, 10);
+  const stg = parseInt(document.getElementById("cfgStagger").value, 10);
+  const ti = parseInt(document.getElementById("cfgTelemIdle").value, 10);
+  const tb = parseInt(document.getElementById("cfgTelemBurst").value, 10);
+  const b = parseInt(document.getElementById("cfgBootAuto").value, 10);
+
   sendJson({
     cmd: "set_hydraulic_config",
     capacity: cap,
     trigger: trig,
-    cutoff: cut
-  });
-
-  const r = parseInt(document.getElementById("cfgRuntime").value, 10);
-  const c = parseInt(document.getElementById("cfgCooldown").value, 10);
-  const t = parseInt(document.getElementById("cfgTelem").value, 10);
-  const b = parseInt(document.getElementById("cfgBootAuto").value, 10);
-  sendJson({
-    cmd: "set_config",
+    cutoff: cut,
+    auto_mask: [m1, m2, m3],
     runtime: r,
     cooldown: c,
-    telem: t,
+    stagger: stg,
+    telem_idle: ti,
+    telem_burst: tb,
     boot_auto: b
   });
-  showToast("Hydraulics & Timings Saved!", false);
 }
 
 function saveLoraConfig() {
@@ -3723,6 +4273,8 @@ function saveLoraConfig() {
   const cr = parseInt(document.getElementById("cfgLoraCr").value, 10);
   const ldro = parseInt(document.getElementById("cfgLoraLdro").value, 10);
   const sync = document.getElementById("cfgLoraSync").value.trim();
+  const lbtRetries = parseInt(document.getElementById("cfgLbtRetries").value, 10);
+  const lbtBackoff = parseInt(document.getElementById("cfgLbtBackoff").value, 10);
   sendJson({
     cmd: "set_lora_config",
     freq: freq,
@@ -3731,9 +4283,10 @@ function saveLoraConfig() {
     bw: bw,
     cr: cr,
     ldro: isNaN(ldro) ? 0 : ldro,
-    sync: sync
+    sync: sync,
+    lbt_retries: isNaN(lbtRetries) ? 4 : lbtRetries,
+    lbt_backoff: isNaN(lbtBackoff) ? 60 : lbtBackoff
   });
-  showToast("LoRa RF Tuning Applied!", false);
 }
 
 function saveWifiConfig() {
@@ -4009,6 +4562,8 @@ function renderMatrix(t) {
       plausEl.innerHTML = `<span class="badge-tag fault">PLAUSIBILITY FAULT</span>`;
     } else if (t.err === 2) {
       plausEl.innerHTML = `<span class="badge-tag fault">I²C DISCONNECTED</span>`;
+    } else if (t.err === 3) {
+      plausEl.innerHTML = `<span class="badge-tag warn">GATEWAY TIMEOUT</span>`;
     } else {
       plausEl.innerHTML = `<span class="badge-tag ok">VALID (L:${t.wl})</span>`;
     }
@@ -4127,6 +4682,43 @@ function renderMatrix(t) {
     humEl.innerText = `${t.hum} % RH`;
   }
 
+  // RF Modulation, ToA & LBT CAD Matrix Fields
+  const rfModEl = document.getElementById("mRfModulation");
+  if (rfModEl && t.lora_sf !== undefined) {
+    const bwKhz = (t.lora_bw > 1000) ? Math.round(t.lora_bw / 1000) : (t.lora_bw || 125);
+    const pwr = (t.lora_power !== undefined) ? t.lora_power : (t.lora_pwr !== undefined ? t.lora_pwr : 22);
+    rfModEl.innerText = `SF${t.lora_sf} | ${bwKhz}kHz | 4/${t.lora_cr || 5} | ${pwr >= 0 ? "+" : ""}${pwr}dBm`;
+  }
+
+  const rfToaEl = document.getElementById("mRfToaLdro");
+  if (rfToaEl && t.toa_ms !== undefined) {
+    const ldroTxt = t.ldro_active ? "LDRO:ON" : "LDRO:OFF";
+    rfToaEl.innerHTML = `<span class="badge-tag ${t.ldro_active ? 'ok' : 'idle'}">${ldroTxt}</span> ${t.toa_ms}ms (Guard: ${t.guard_ms}ms)`;
+  }
+
+  const rfCadEl = document.getElementById("mRfCadLbt");
+  if (rfCadEl) {
+    const defers = (t.cad_busy_cnt !== undefined) ? t.cad_busy_cnt : (t.cad_defers || 0);
+    const lastBo = t.last_cad_backoff || 0;
+    rfCadEl.innerText = `4-Symb | Retries: ${t.lbt_retries ?? 4} | Deferrals: ${defers} | Backoff: ${lastBo}ms`;
+  }
+
+  const telemModeEl = document.getElementById("mTelemRateMode");
+  if (telemModeEl) {
+    const burst = Boolean(t.burst_mode);
+    const activeMs = t.cfg_telem || (burst ? t.cfg_telem_burst : t.cfg_telem_idle) || 3000;
+    telemModeEl.innerHTML = burst
+      ? `<span class="badge-tag active">EVENT BURST (${(activeMs / 1000).toFixed(1)}s)</span>`
+      : `<span class="badge-tag ok">SILENT IDLE (${Math.round(activeMs / 1000)}s)</span>`;
+  }
+
+  const pktStatsEl = document.getElementById("mRfPktStats");
+  if (pktStatsEl && t.tx_cnt !== undefined) {
+    const txAgo = (t.last_tx_ago >= 0) ? `${t.last_tx_ago}s ago` : "never";
+    const rxAgo = (t.last_rx_ago >= 0) ? `${t.last_rx_ago}s ago` : "never";
+    pktStatsEl.innerText = `TX: ${t.tx_cnt} (${txAgo}) • RX: ${t.rx_cnt || 0} (${rxAgo})`;
+  }
+
   // 4. MCU & Network
   const freeBytes = t.heap || 0;
   const freeKb = Math.round(freeBytes / 1024);
@@ -4167,7 +4759,10 @@ function renderMatrix(t) {
   // NVS Timers & Auto Masks
   const nvsTimersEl = document.getElementById("mNvsTimers");
   if (nvsTimersEl && t.cfg_runtime) {
-    nvsTimersEl.innerText = `${t.cfg_runtime/1000}s / ${t.cfg_cooldown/1000}s / ${t.cfg_telem/1000}s`;
+    const stgS = (t.cfg_stagger || 3000) / 1000;
+    const idleS = (t.cfg_telem_idle || t.cfg_telem || 600000) / 1000;
+    const burstS = (t.cfg_telem_burst || 3000) / 1000;
+    nvsTimersEl.innerText = `RT:${t.cfg_runtime/1000}s CD:${t.cfg_cooldown/1000}s STG:${stgS}s | Idle:${idleS}s Burst:${burstS}s`;
   }
 
   const masksEl = document.getElementById("mAutoMasks");
@@ -4180,5 +4775,4 @@ function renderMatrix(t) {
 </script>
 </body>
 </html>
-
-)rawliteral";
+)RAW_HTML";
